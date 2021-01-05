@@ -21,7 +21,11 @@
 
 namespace sw {
 
-Constants constants;
+const Constants &Constants::Get()
+{
+	static const Constants constants;
+	return constants;
+}
 
 Constants::Constants()
 {
@@ -332,10 +336,6 @@ Constants::Constants()
 	memcpy(&this->minY, &minY, sizeof(minY));
 	memcpy(&this->minZ, &minZ, sizeof(minZ));
 	memcpy(&this->fini, &fini, sizeof(fini));
-
-	static const dword4 maxPos = { 0x7F7FFFFF, 0x7F7FFFFF, 0x7F7FFFFF, 0x7F7FFFFE };
-
-	memcpy(&this->maxPos, &maxPos, sizeof(maxPos));
 
 	static const float4 unscaleByte = { 1.0f / 0xFF, 1.0f / 0xFF, 1.0f / 0xFF, 1.0f / 0xFF };
 	static const float4 unscaleSByte = { 1.0f / 0x7F, 1.0f / 0x7F, 1.0f / 0x7F, 1.0f / 0x7F };
