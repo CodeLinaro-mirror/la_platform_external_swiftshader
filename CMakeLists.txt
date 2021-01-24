@@ -14,9 +14,14 @@
 
 cmake_minimum_required(VERSION 3.13)
 
-set(CMAKE_CXX_STANDARD 14)
-
 project(SwiftShader C CXX ASM)
+
+set(CMAKE_CXX_STANDARD 14)
+set(CXX_STANDARD_REQUIRED ON)
+# MSVC doesn't define __cplusplus by default
+if(MSVC)
+    string(APPEND CMAKE_CXX_FLAGS " /Zc:__cplusplus")
+endif()
 
 ###########################################################
 # Detect system
@@ -515,6 +520,11 @@ else()
     set_cpp_flag("-fomit-frame-pointer" RELEASE)
 
     if(SWIFTSHADER_MSAN)
+        if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+            message(FATAL_ERROR " \n"
+                    " MemorySanitizer usage requires compiling with Clang.")
+        endif()
+
         if(NOT DEFINED ENV{SWIFTSHADER_MSAN_INSTRUMENTED_LIBCXX_PATH})
             message(FATAL_ERROR " \n"
                     " MemorySanitizer usage requires an instrumented build of libc++.\n"
