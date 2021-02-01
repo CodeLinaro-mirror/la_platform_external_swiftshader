@@ -217,6 +217,14 @@ static void getPhysicalDeviceShaderSubgroupExtendedTypesFeatures(T *features)
 	features->shaderSubgroupExtendedTypes = VK_TRUE;
 }
 
+#ifdef SWIFTSHADER_DEVICE_MEMORY_REPORT
+template<typename T>
+static void getPhysicalDeviceDeviceMemoryReportFeaturesEXT(T *features)
+{
+	features->deviceMemoryReport = VK_TRUE;
+}
+#endif  // SWIFTSHADER_DEVICE_MEMORY_REPORT
+
 template<typename T>
 static void getPhysicalDeviceVulkan12Features(T *features)
 {
@@ -263,7 +271,7 @@ static void getPhysicalDeviceVulkan12Features(T *features)
 	features->vulkanMemoryModelAvailabilityVisibilityChains = VK_FALSE;
 	features->shaderOutputViewportIndex = VK_FALSE;
 	features->shaderOutputLayer = VK_FALSE;
-	features->subgroupBroadcastDynamicId = VK_FALSE;
+	features->subgroupBroadcastDynamicId = VK_TRUE;
 }
 
 void PhysicalDevice::getFeatures2(VkPhysicalDeviceFeatures2 *features) const
@@ -320,6 +328,11 @@ void PhysicalDevice::getFeatures2(VkPhysicalDeviceFeatures2 *features) const
 			case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_SUBGROUP_EXTENDED_TYPES_FEATURES_KHR:
 				getPhysicalDeviceShaderSubgroupExtendedTypesFeatures(reinterpret_cast<VkPhysicalDeviceShaderSubgroupExtendedTypesFeatures *>(curExtension));
 				break;
+#ifdef SWIFTSHADER_DEVICE_MEMORY_REPORT
+			case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEVICE_MEMORY_REPORT_FEATURES_EXT:
+				getPhysicalDeviceDeviceMemoryReportFeaturesEXT(reinterpret_cast<VkPhysicalDeviceDeviceMemoryReportFeaturesEXT *>(curExtension));
+				break;
+#endif  // SWIFTSHADER_DEVICE_MEMORY_REPORT
 			default:
 				LOG_TRAP("curExtension->pNext->sType = %s", vk::Stringify(curExtension->sType).c_str());
 				break;
@@ -699,6 +712,38 @@ void PhysicalDevice::getProperties(VkPhysicalDeviceLineRasterizationPropertiesEX
 void PhysicalDevice::getProperties(VkPhysicalDeviceProvokingVertexPropertiesEXT *properties) const
 {
 	properties->provokingVertexModePerPipeline = VK_TRUE;
+}
+
+void PhysicalDevice::getProperties(VkPhysicalDeviceFloatControlsProperties *properties) const
+{
+	// The spec states:
+	// shaderSignedZeroInfNanPreserveFloat32 is a boolean value indicating whether
+	// sign of a zero, Nans and ±∞ can be preserved in 32-bit floating-point
+	// computations. It also indicates whether the SignedZeroInfNanPreserve execution
+	// mode can be used for 32-bit floating-point types.
+	//
+	// There are similar clauses for all the shader* bools present here.
+	//
+	// It does not state that an implementation must report its default behavior using
+	// these variables. At this time SwiftShader does not expose any preserve, denormal,
+	// or rounding controls.
+	properties->denormBehaviorIndependence = VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE;
+	properties->roundingModeIndependence = VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE;
+	properties->shaderSignedZeroInfNanPreserveFloat16 = VK_FALSE;
+	properties->shaderSignedZeroInfNanPreserveFloat32 = VK_FALSE;
+	properties->shaderSignedZeroInfNanPreserveFloat64 = VK_FALSE;
+	properties->shaderDenormPreserveFloat16 = VK_FALSE;
+	properties->shaderDenormPreserveFloat32 = VK_FALSE;
+	properties->shaderDenormPreserveFloat64 = VK_FALSE;
+	properties->shaderDenormFlushToZeroFloat16 = VK_FALSE;
+	properties->shaderDenormFlushToZeroFloat32 = VK_FALSE;
+	properties->shaderDenormFlushToZeroFloat64 = VK_FALSE;
+	properties->shaderRoundingModeRTZFloat16 = VK_FALSE;
+	properties->shaderRoundingModeRTZFloat32 = VK_FALSE;
+	properties->shaderRoundingModeRTZFloat64 = VK_FALSE;
+	properties->shaderRoundingModeRTEFloat16 = VK_FALSE;
+	properties->shaderRoundingModeRTEFloat32 = VK_FALSE;
+	properties->shaderRoundingModeRTEFloat64 = VK_FALSE;
 }
 
 bool PhysicalDevice::hasFeatures(const VkPhysicalDeviceFeatures &requestedFeatures) const

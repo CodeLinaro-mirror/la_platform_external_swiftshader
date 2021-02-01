@@ -16,6 +16,7 @@
 
 #include "Debug.hpp"
 #include "ExecutableMemory.hpp"
+#include "LLVMAsm.hpp"
 #include "Routine.hpp"
 
 // TODO(b/143539525): Eliminate when warning has been fixed.
@@ -29,8 +30,10 @@ __pragma(warning(push))
 #include "llvm/ExecutionEngine/Orc/RTDyldObjectLinkingLayer.h"
 #include "llvm/ExecutionEngine/SectionMemoryManager.h"
 #include "llvm/IR/LegacyPassManager.h"
+#include "llvm/Support/Host.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Transforms/InstCombine/InstCombine.h"
+#include "llvm/Transforms/Instrumentation/MemorySanitizer.h"
 #include "llvm/Transforms/Scalar.h"
 #include "llvm/Transforms/Scalar/GVN.h"
 
@@ -52,6 +55,53 @@ extern "C" signed __aeabi_idivmod();
 #	include "sanitizer/msan_interface.h"  // TODO(b/155148722): Remove when we no longer unpoison all writes.
 
 #	include <dlfcn.h>  // dlsym()
+
+// MemorySanitizer uses thread-local storage (TLS) data arrays for passing around
+// the 'shadow' values of function arguments and return values. The LLVM JIT can't
+// access TLS directly, but it calls __emutls_get_address() to obtain the address.
+// Typically, it would be passed a pointer to an __emutls_control structure with a
+// name starting with "__emutls_v." that represents the TLS. Both the address of
+// __emutls_get_address and the __emutls_v. structures are provided to the JIT by
+// the symbol resolver, which can be overridden.
+// We take advantage of this by substituting __emutls_get_address() with our own
+// implementation, namely rr::getTLSAddress(), and substituting the __emutls_v
+// variables with rr::MSanTLS enums. getTLSAddress() can then provide the address
+// of the real TLS variable corresponding to the enum, in statically compiled C++.
+
+// Forward declare the real TLS variables used by MemorySanitizer. These are
+// defined in llvm-project/compiler-rt/lib/msan/msan.cpp.
+extern __thread unsigned long long __msan_param_tls[];
+extern __thread unsigned long long __msan_retval_tls[];
+extern __thread unsigned long long __msan_va_arg_tls[];
+extern __thread unsigned long long __msan_va_arg_overflow_size_tls;
+
+namespace rr {
+
+enum class MSanTLS
+{
+	param = 1,            // __msan_param_tls
+	retval,               // __msan_retval_tls
+	va_arg,               // __msan_va_arg_tls
+	va_arg_overflow_size  // __msan_va_arg_overflow_size_tls
+};
+
+static void *getTLSAddress(void *control)
+{
+	auto tlsIndex = static_cast<MSanTLS>(reinterpret_cast<uintptr_t>(control));
+	switch(tlsIndex)
+	{
+
+		case MSanTLS::param: return reinterpret_cast<void *>(&__msan_param_tls);
+		case MSanTLS::retval: return reinterpret_cast<void *>(&__msan_retval_tls);
+		case MSanTLS::va_arg: return reinterpret_cast<void *>(&__msan_va_arg_tls);
+		case MSanTLS::va_arg_overflow_size: return reinterpret_cast<void *>(&__msan_va_arg_overflow_size_tls);
+		default:
+			UNSUPPORTED("MemorySanitizer used an unrecognized TLS variable: %d", tlsIndex);
+			return nullptr;
+	}
+}
+
+}  // namespace rr
 #endif
 
 namespace {
@@ -65,13 +115,14 @@ public:
 
 	llvm::orc::JITTargetMachineBuilder getTargetMachineBuilder(rr::Optimization::Level optLevel) const;
 	const llvm::DataLayout &getDataLayout() const;
-	const llvm::Triple getTargetTriple() const;
+	const llvm::Triple &getTargetTriple() const;
 
 private:
-	JITGlobals(const llvm::orc::JITTargetMachineBuilder &jtmb, const llvm::DataLayout &dataLayout);
+	JITGlobals(llvm::orc::JITTargetMachineBuilder &&jitTargetMachineBuilder, llvm::DataLayout &&dataLayout);
 
 	static llvm::CodeGenOpt::Level toLLVM(rr::Optimization::Level level);
-	const llvm::orc::JITTargetMachineBuilder jtmb;
+
+	const llvm::orc::JITTargetMachineBuilder jitTargetMachineBuilder;
 	const llvm::DataLayout dataLayout;
 };
 
@@ -82,19 +133,51 @@ JITGlobals *JITGlobals::get()
 		llvm::InitializeNativeTargetAsmPrinter();
 		llvm::InitializeNativeTargetAsmParser();
 
-		auto jtmb = llvm::orc::JITTargetMachineBuilder::detectHost();
-		ASSERT_MSG(jtmb, "JITTargetMachineBuilder::detectHost() failed");
-		auto dataLayout = jtmb->getDefaultDataLayoutForTarget();
+		// TODO(b/171236524): JITTargetMachineBuilder::detectHost() currently uses the target triple of the host,
+		// rather than a valid triple for the current process. Once fixed, we can use that function instead.
+		llvm::orc::JITTargetMachineBuilder jitTargetMachineBuilder(llvm::Triple(LLVM_DEFAULT_TARGET_TRIPLE));
+
+		// Retrieve host CPU name and sub-target features and add them to builder.
+		// Relocation model, code model and codegen opt level are kept to default values.
+		llvm::StringMap<bool> cpuFeatures;
+		bool ok = llvm::sys::getHostCPUFeatures(cpuFeatures);
+
+#if defined(__i386__) || defined(__x86_64__) || \
+    (defined(__linux__) && (defined(__arm__) || defined(__aarch64__)))
+		ASSERT_MSG(ok, "llvm::sys::getHostCPUFeatures returned false");
+#else
+		(void)ok;  // getHostCPUFeatures always returns false on other platforms
+#endif
+
+		for(auto &feature : cpuFeatures)
+		{
+			jitTargetMachineBuilder.getFeatures().AddFeature(feature.first(), feature.second);
+		}
+
+#if LLVM_VERSION_MAJOR >= 11 /* TODO(b/165000222): Unconditional after LLVM 11 upgrade */
+		jitTargetMachineBuilder.setCPU(std::string(llvm::sys::getHostCPUName()));
+#else
+		jitTargetMachineBuilder.setCPU(llvm::sys::getHostCPUName());
+#endif
+
+		// Reactor's MemorySanitizer support depends on intercepting __emutls_get_address calls.
+		ASSERT(!__has_feature(memory_sanitizer) || (jitTargetMachineBuilder.getOptions().ExplicitEmulatedTLS &&
+		                                            jitTargetMachineBuilder.getOptions().EmulatedTLS));
+
+		auto dataLayout = jitTargetMachineBuilder.getDefaultDataLayoutForTarget();
 		ASSERT_MSG(dataLayout, "JITTargetMachineBuilder::getDefaultDataLayoutForTarget() failed");
-		return JITGlobals(jtmb.get(), dataLayout.get());
+
+		return JITGlobals(std::move(jitTargetMachineBuilder), std::move(dataLayout.get()));
 	}();
+
 	return &instance;
 }
 
 llvm::orc::JITTargetMachineBuilder JITGlobals::getTargetMachineBuilder(rr::Optimization::Level optLevel) const
 {
-	llvm::orc::JITTargetMachineBuilder out = jtmb;
+	llvm::orc::JITTargetMachineBuilder out = jitTargetMachineBuilder;
 	out.setCodeGenOptLevel(toLLVM(optLevel));
+
 	return out;
 }
 
@@ -103,19 +186,27 @@ const llvm::DataLayout &JITGlobals::getDataLayout() const
 	return dataLayout;
 }
 
-const llvm::Triple JITGlobals::getTargetTriple() const
+const llvm::Triple &JITGlobals::getTargetTriple() const
 {
-	return jtmb.getTargetTriple();
+	return jitTargetMachineBuilder.getTargetTriple();
 }
 
-JITGlobals::JITGlobals(const llvm::orc::JITTargetMachineBuilder &jtmb, const llvm::DataLayout &dataLayout)
-    : jtmb(jtmb)
+JITGlobals::JITGlobals(llvm::orc::JITTargetMachineBuilder &&jitTargetMachineBuilder, llvm::DataLayout &&dataLayout)
+    : jitTargetMachineBuilder(jitTargetMachineBuilder)
     , dataLayout(dataLayout)
 {
 }
 
 llvm::CodeGenOpt::Level JITGlobals::toLLVM(rr::Optimization::Level level)
 {
+	// TODO(b/173257647): MemorySanitizer instrumentation produces IR which takes
+	// a lot longer to process by the machine code optimization passes. Disabling
+	// them has a negligible effect on code quality but compiles much faster.
+	if(__has_feature(memory_sanitizer))
+	{
+		return llvm::CodeGenOpt::None;
+	}
+
 	switch(level)
 	{
 		case rr::Optimization::Level::None: return llvm::CodeGenOpt::None;
@@ -124,6 +215,7 @@ llvm::CodeGenOpt::Level JITGlobals::toLLVM(rr::Optimization::Level level)
 		case rr::Optimization::Level::Aggressive: return llvm::CodeGenOpt::Aggressive;
 		default: UNREACHABLE("Unknown Optimization Level %d", int(level));
 	}
+
 	return llvm::CodeGenOpt::Default;
 }
 
@@ -361,6 +453,7 @@ class ExternalSymbolGenerator : public llvm::orc::JITDylib::DefinitionGenerator
 			functions.try_emplace("exp2f", reinterpret_cast<void *>(exp2f));
 			functions.try_emplace("log2f", reinterpret_cast<void *>(log2f));
 
+			functions.try_emplace("fmod", reinterpret_cast<void *>(static_cast<double (*)(double, double)>(fmod)));
 			functions.try_emplace("sin", reinterpret_cast<void *>(static_cast<double (*)(double)>(sin)));
 			functions.try_emplace("cos", reinterpret_cast<void *>(static_cast<double (*)(double)>(cos)));
 			functions.try_emplace("asin", reinterpret_cast<void *>(static_cast<double (*)(double)>(asin)));
@@ -385,6 +478,8 @@ class ExternalSymbolGenerator : public llvm::orc::JITDylib::DefinitionGenerator
 			// FIXME(b/119409619): use an allocator here so we can control all memory allocations
 			functions.try_emplace("coroutine_alloc_frame", reinterpret_cast<void *>(coroutine_alloc_frame));
 			functions.try_emplace("coroutine_free_frame", reinterpret_cast<void *>(coroutine_free_frame));
+
+			functions.try_emplace("memset", reinterpret_cast<void *>(memset));
 
 #ifdef __APPLE__
 			functions.try_emplace("sincosf_stret", reinterpret_cast<void *>(__sincosf_stret));
@@ -413,9 +508,22 @@ class ExternalSymbolGenerator : public llvm::orc::JITDylib::DefinitionGenerator
 			functions.try_emplace("sync_fetch_and_min_4", reinterpret_cast<void *>(sync_fetch_and_min_4));
 			functions.try_emplace("sync_fetch_and_umax_4", reinterpret_cast<void *>(sync_fetch_and_umax_4));
 			functions.try_emplace("sync_fetch_and_umin_4", reinterpret_cast<void *>(sync_fetch_and_umin_4));
+
+#	if defined(__i386__)
+			// TODO(b/172974501): Workaround for an x86-32 issue where an R_386_PC32 relocation is used
+			// When calling a C function from Reactor code, who's address is not associated with any symbol
+			// (since it's an absolute constant), but it still invokes the symbol resolver for "".
+			functions.try_emplace("", nullptr);
+#	endif
 #endif
 #if __has_feature(memory_sanitizer)
 			functions.try_emplace("msan_unpoison", reinterpret_cast<void *>(__msan_unpoison));  // TODO(b/155148722): Remove when we no longer unpoison all writes.
+
+			functions.try_emplace("emutls_get_address", reinterpret_cast<void *>(rr::getTLSAddress));
+			functions.try_emplace("emutls_v.__msan_retval_tls", reinterpret_cast<void *>(static_cast<uintptr_t>(rr::MSanTLS::retval)));
+			functions.try_emplace("emutls_v.__msan_param_tls", reinterpret_cast<void *>(static_cast<uintptr_t>(rr::MSanTLS::param)));
+			functions.try_emplace("emutls_v.__msan_va_arg_tls", reinterpret_cast<void *>(static_cast<uintptr_t>(rr::MSanTLS::va_arg)));
+			functions.try_emplace("emutls_v.__msan_va_arg_overflow_size_tls", reinterpret_cast<void *>(static_cast<uintptr_t>(rr::MSanTLS::va_arg_overflow_size)));
 #endif
 		}
 	};
@@ -514,6 +622,7 @@ auto &Unwrap(T &&v)
 // settings and no Reactor routine directly links against another.
 class JITRoutine : public rr::Routine
 {
+	std::string name;
 	llvm::orc::ExecutionSession session;
 	llvm::orc::RTDyldObjectLinkingLayer objectLayer;
 	llvm::orc::IRCompileLayer compileLayer;
@@ -525,12 +634,14 @@ class JITRoutine : public rr::Routine
 public:
 	JITRoutine(
 	    std::unique_ptr<llvm::Module> module,
+	    const char *name,
 	    llvm::Function **funcs,
 	    size_t count,
 	    const rr::Config &config)
-	    : objectLayer(session, []() {
-		    static MemoryMapper mm;
-		    return std::make_unique<llvm::SectionMemoryManager>(&mm);
+	    : name(name)
+	    , objectLayer(session, []() {
+		    static MemoryMapper memoryMapper;
+		    return std::make_unique<llvm::SectionMemoryManager>(&memoryMapper);
 	    })
 	    , compileLayer(session, objectLayer, std::make_unique<llvm::orc::ConcurrentIRCompiler>(JITGlobals::get()->getTargetMachineBuilder(config.getOptimization().getLevel())))
 	    , mangle(session, JITGlobals::get()->getDataLayout())
@@ -577,6 +688,11 @@ public:
 			names[i] = mangle(func->getName());
 		}
 
+#ifdef ENABLE_RR_EMIT_ASM_FILE
+		const auto asmFilename = rr::AsmFile::generateFilename(name);
+		rr::AsmFile::emitAsmFile(asmFilename, JITGlobals::get()->getTargetMachineBuilder(config.getOptimization().getLevel()), *module);
+#endif
+
 		// Once the module is passed to the compileLayer, the
 		// llvm::Functions are freed. Make sure funcs are not referenced
 		// after this point.
@@ -592,6 +708,10 @@ public:
 			           (int)i, llvm::toString(symbol.takeError()).c_str());
 			addresses[i] = reinterpret_cast<void *>(static_cast<intptr_t>(symbol->getAddress()));
 		}
+
+#ifdef ENABLE_RR_EMIT_ASM_FILE
+		rr::AsmFile::fixupAsmFile(asmFilename, addresses);
+#endif
 	}
 
 	~JITRoutine()
@@ -634,6 +754,13 @@ void JITBuilder::optimize(const rr::Config &cfg)
 
 	llvm::legacy::PassManager passManager;
 
+#if REACTOR_ENABLE_MEMORY_SANITIZER_INSTRUMENTATION
+	if(__has_feature(memory_sanitizer))
+	{
+		passManager.add(llvm::createMemorySanitizerLegacyPassPass());
+	}
+#endif
+
 	for(auto pass : cfg.getOptimization().getPasses())
 	{
 		switch(pass)
@@ -657,10 +784,10 @@ void JITBuilder::optimize(const rr::Config &cfg)
 	passManager.run(*module);
 }
 
-std::shared_ptr<rr::Routine> JITBuilder::acquireRoutine(llvm::Function **funcs, size_t count, const rr::Config &cfg)
+std::shared_ptr<rr::Routine> JITBuilder::acquireRoutine(const char *name, llvm::Function **funcs, size_t count, const rr::Config &cfg)
 {
 	ASSERT(module);
-	return std::make_shared<JITRoutine>(std::move(module), funcs, count, cfg);
+	return std::make_shared<JITRoutine>(std::move(module), name, funcs, count, cfg);
 }
 
 }  // namespace rr

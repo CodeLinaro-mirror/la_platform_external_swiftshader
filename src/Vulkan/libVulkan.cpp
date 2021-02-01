@@ -387,11 +387,17 @@ static const VkExtensionProperties deviceExtensionProperties[] = {
 	{ VK_FUCHSIA_EXTERNAL_MEMORY_EXTENSION_NAME, VK_FUCHSIA_EXTERNAL_MEMORY_SPEC_VERSION },
 #endif
 	{ VK_EXT_PROVOKING_VERTEX_EXTENSION_NAME, VK_EXT_PROVOKING_VERTEX_SPEC_VERSION },
+#if !defined(__ANDROID__)
 	{ VK_GOOGLE_SAMPLER_FILTERING_PRECISION_EXTENSION_NAME, VK_GOOGLE_SAMPLER_FILTERING_PRECISION_SPEC_VERSION },
+#endif
 	{ VK_EXT_DEPTH_RANGE_UNRESTRICTED_EXTENSION_NAME, VK_EXT_DEPTH_RANGE_UNRESTRICTED_SPEC_VERSION },
+#ifdef SWIFTSHADER_DEVICE_MEMORY_REPORT
+	{ VK_EXT_DEVICE_MEMORY_REPORT_EXTENSION_NAME, VK_EXT_DEVICE_MEMORY_REPORT_SPEC_VERSION },
+#endif  // SWIFTSHADER_DEVICE_MEMORY_REPORT
 	// Vulkan 1.2 promoted extensions
 	{ VK_KHR_IMAGE_FORMAT_LIST_EXTENSION_NAME, VK_KHR_IMAGE_FORMAT_LIST_SPEC_VERSION },
 	{ VK_KHR_IMAGELESS_FRAMEBUFFER_EXTENSION_NAME, VK_KHR_IMAGELESS_FRAMEBUFFER_SPEC_VERSION },
+	{ VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME, VK_KHR_SHADER_FLOAT_CONTROLS_SPEC_VERSION },
 	{ VK_KHR_SHADER_SUBGROUP_EXTENDED_TYPES_EXTENSION_NAME, VK_KHR_SHADER_SUBGROUP_EXTENDED_TYPES_SPEC_VERSION }
 };
 
@@ -764,6 +770,14 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physicalDevice, c
 				(void)imagelessFramebufferFeatures->imagelessFramebuffer;
 			}
 			break;
+#ifdef SWIFTSHADER_DEVICE_MEMORY_REPORT
+			case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEVICE_MEMORY_REPORT_FEATURES_EXT:
+			{
+				const VkPhysicalDeviceDeviceMemoryReportFeaturesEXT *deviceMemoryReportFeatures = reinterpret_cast<const VkPhysicalDeviceDeviceMemoryReportFeaturesEXT *>(extensionCreateInfo);
+				(void)deviceMemoryReportFeatures->deviceMemoryReport;
+			}
+			break;
+#endif  // SWIFTSHADER_DEVICE_MEMORY_REPORT
 			default:
 				// "the [driver] must skip over, without processing (other than reading the sType and pNext members) any structures in the chain with sType values not defined by [supported extenions]"
 				LOG_TRAP("pCreateInfo->pNext sType = %s", vk::Stringify(extensionCreateInfo->sType).c_str());
@@ -1933,6 +1947,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateSampler(VkDevice device, const VkSamplerC
 				ycbcrConversion = vk::Cast(samplerYcbcrConversionInfo->conversion);
 			}
 			break;
+#if !defined(__ANDROID__)
 			case VK_STRUCTURE_TYPE_SAMPLER_FILTERING_PRECISION_GOOGLE:
 			{
 				const VkSamplerFilteringPrecisionGOOGLE *filteringInfo =
@@ -1940,6 +1955,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateSampler(VkDevice device, const VkSamplerC
 				filteringPrecision = filteringInfo->samplerFilteringPrecisionMode;
 			}
 			break;
+#endif
 			default:
 				LOG_TRAP("pCreateInfo->pNext sType = %s", vk::Stringify(extensionCreateInfo->sType).c_str());
 				break;
@@ -2926,6 +2942,12 @@ VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceProperties2(VkPhysicalDevice physi
 			case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROVOKING_VERTEX_PROPERTIES_EXT:
 			{
 				auto properties = reinterpret_cast<VkPhysicalDeviceProvokingVertexPropertiesEXT *>(extensionProperties);
+				vk::Cast(physicalDevice)->getProperties(properties);
+			}
+			break;
+			case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FLOAT_CONTROLS_PROPERTIES_KHR:
+			{
+				auto properties = reinterpret_cast<VkPhysicalDeviceFloatControlsProperties *>(extensionProperties);
 				vk::Cast(physicalDevice)->getProperties(properties);
 			}
 			break;

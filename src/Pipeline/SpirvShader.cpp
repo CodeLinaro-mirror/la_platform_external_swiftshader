@@ -673,6 +673,7 @@ SpirvShader::SpirvShader(
 			case spv::OpGroupNonUniformLogicalOr:
 			case spv::OpGroupNonUniformLogicalXor:
 			case spv::OpCopyObject:
+			case spv::OpCopyLogical:
 			case spv::OpArrayLength:
 				// Instructions that yield an intermediate value or divergent pointer
 				DefineResult(insn);
@@ -717,6 +718,7 @@ SpirvShader::SpirvShader(
 				if(!strcmp(ext, "SPV_KHR_device_group")) break;
 				if(!strcmp(ext, "SPV_KHR_multiview")) break;
 				if(!strcmp(ext, "SPV_EXT_shader_stencil_export")) break;
+				if(!strcmp(ext, "SPV_KHR_float_controls")) break;
 				UNSUPPORTED("SPIR-V Extension: %s", ext);
 				break;
 			}
@@ -1954,6 +1956,7 @@ SpirvShader::EmitResult SpirvShader::EmitInstruction(InsnIterator insn, EmitStat
 			return EmitSampledImageCombineOrSplit(insn, state);
 
 		case spv::OpCopyObject:
+		case spv::OpCopyLogical:
 			return EmitCopyObject(insn, state);
 
 		case spv::OpCopyMemory:
