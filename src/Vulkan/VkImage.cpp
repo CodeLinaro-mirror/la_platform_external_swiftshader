@@ -148,8 +148,17 @@ VkFormat GetImageFormat(const VkImageCreateInfo *pCreateInfo)
 			}
 			break;
 #endif
+		// We support these extensions, but they don't affect the image format.
+		case VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO:
+		case VK_STRUCTURE_TYPE_IMAGE_SWAPCHAIN_CREATE_INFO_KHR:
+		case VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO:
+		case VK_STRUCTURE_TYPE_IMAGE_STENCIL_USAGE_CREATE_INFO:
+			break;
+		case VK_STRUCTURE_TYPE_MAX_ENUM:
+			// dEQP tests that this value is ignored.
+			break;
 		default:
-			LOG_TRAP("pCreateInfo->pNext->sType = %s", vk::Stringify(nextInfo->sType).c_str());
+			UNSUPPORTED("pCreateInfo->pNext->sType = %s", vk::Stringify(nextInfo->sType).c_str());
 			break;
 		}
 
@@ -197,7 +206,7 @@ void Image::destroy(const VkAllocationCallbacks *pAllocator)
 {
 	if(decompressedImage)
 	{
-		vk::deallocate(decompressedImage, pAllocator);
+		vk::freeHostMemory(decompressedImage, pAllocator);
 	}
 }
 
@@ -346,6 +355,27 @@ void Image::getSubresourceLayout(const VkImageSubresource *pSubresource, VkSubre
 }
 
 void Image::copyTo(Image *dstImage, const VkImageCopy &region) const
+{
+	static constexpr VkImageAspectFlags CombinedDepthStencilAspects =
+	    VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+	if((region.srcSubresource.aspectMask == CombinedDepthStencilAspects) &&
+	   (region.dstSubresource.aspectMask == CombinedDepthStencilAspects))
+	{
+		// Depth and stencil can be specified together, copy each separately
+		VkImageCopy singleAspectRegion = region;
+		singleAspectRegion.srcSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+		singleAspectRegion.dstSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+		copySingleAspectTo(dstImage, singleAspectRegion);
+		singleAspectRegion.srcSubresource.aspectMask = VK_IMAGE_ASPECT_STENCIL_BIT;
+		singleAspectRegion.dstSubresource.aspectMask = VK_IMAGE_ASPECT_STENCIL_BIT;
+		copySingleAspectTo(dstImage, singleAspectRegion);
+		return;
+	}
+
+	copySingleAspectTo(dstImage, region);
+}
+
+void Image::copySingleAspectTo(Image *dstImage, const VkImageCopy &region) const
 {
 	// Image copy does not perform any conversion, it simply copies memory from
 	// an image to another image that has the same number of bytes per pixel.
@@ -734,7 +764,7 @@ VkExtent2D Image::bufferExtentInBlocks(const VkExtent2D &extent, const VkBufferI
 int Image::borderSize() const
 {
 	// We won't add a border to compressed cube textures, we'll add it when we decompress the texture
-	return (isCube() && !format.isCompressed()) ? 1 : 0;
+	return (isCubeCompatible() && !format.isCompressed()) ? 1 : 0;
 }
 
 VkDeviceSize Image::texelOffsetBytesInStorage(const VkOffset3D &offset, const VkImageSubresource &subresource) const
@@ -807,7 +837,7 @@ int Image::rowPitchBytes(VkImageAspectFlagBits aspect, uint32_t mipLevel) const
 		return extentInBlocks.width * usedFormat.bytesPerBlock();
 	}
 
-	return usedFormat.pitchB(mipLevelExtent.width, borderSize(), true);
+	return usedFormat.pitchB(mipLevelExtent.width, borderSize());
 }
 
 int Image::slicePitchBytes(VkImageAspectFlagBits aspect, uint32_t mipLevel) const
@@ -824,7 +854,7 @@ int Image::slicePitchBytes(VkImageAspectFlagBits aspect, uint32_t mipLevel) cons
 		return extentInBlocks.height * extentInBlocks.width * usedFormat.bytesPerBlock();
 	}
 
-	return usedFormat.sliceB(mipLevelExtent.width, mipLevelExtent.height, borderSize(), true);
+	return usedFormat.sliceB(mipLevelExtent.width, mipLevelExtent.height, borderSize());
 }
 
 Format Image::getFormat(VkImageAspectFlagBits aspect) const
@@ -832,9 +862,13 @@ Format Image::getFormat(VkImageAspectFlagBits aspect) const
 	return format.getAspectFormat(aspect);
 }
 
-bool Image::isCube() const
+bool Image::isCubeCompatible() const
 {
-	return (flags & VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT) && (imageType == VK_IMAGE_TYPE_2D);
+	bool cubeCompatible = (flags & VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT);
+	ASSERT(!cubeCompatible || (imageType == VK_IMAGE_TYPE_2D));  // VUID-VkImageCreateInfo-flags-00949
+	ASSERT(!cubeCompatible || (arrayLayers >= 6));               // VUID-VkImageCreateInfo-imageType-00954
+
+	return cubeCompatible;
 }
 
 uint8_t *Image::end() const
@@ -904,7 +938,8 @@ VkDeviceSize Image::getMemoryOffset(VkImageAspectFlagBits aspect, uint32_t mipLe
 
 VkDeviceSize Image::getMipLevelSize(VkImageAspectFlagBits aspect, uint32_t mipLevel) const
 {
-	return getMipLevelExtent(aspect, mipLevel).depth * slicePitchBytes(aspect, mipLevel);
+	return static_cast<VkDeviceSize>(slicePitchBytes(aspect, mipLevel)) *
+	       getMipLevelExtent(aspect, mipLevel).depth;
 }
 
 VkDeviceSize Image::getMultiSampledLevelSize(VkImageAspectFlagBits aspect, uint32_t mipLevel) const
@@ -983,7 +1018,9 @@ const Image *Image::getSampledImage(const vk::Format &imageViewFormat) const
 
 void Image::blitTo(Image *dstImage, const VkImageBlit &region, VkFilter filter) const
 {
-	device->getBlitter()->blit(this, dstImage, region, filter);
+	prepareForSampling({ region.srcSubresource.aspectMask, region.srcSubresource.mipLevel, 1,
+	                     region.srcSubresource.baseArrayLayer, region.srcSubresource.layerCount });
+	device->getBlitter()->blit(decompressedImage ? decompressedImage : this, dstImage, region, filter);
 }
 
 void Image::copyTo(uint8_t *dst, unsigned int dstPitch) const
@@ -1089,7 +1126,7 @@ void Image::clear(const VkClearValue &clearValue, const vk::Format &viewFormat, 
 
 bool Image::requiresPreprocessing() const
 {
-	return (isCube() && (arrayLayers >= 6)) || decompressedImage;
+	return isCubeCompatible() || decompressedImage;
 }
 
 void Image::contentsChanged(const VkImageSubresourceRange &subresourceRange, ContentsChangedContext contentsChangedContext)
@@ -1133,7 +1170,7 @@ void Image::contentsChanged(const VkImageSubresourceRange &subresourceRange, Con
 	}
 }
 
-void Image::prepareForSampling(const VkImageSubresourceRange &subresourceRange)
+void Image::prepareForSampling(const VkImageSubresourceRange &subresourceRange) const
 {
 	// If this isn't a cube or a compressed image, there's nothing to do
 	if(!requiresPreprocessing())
@@ -1158,63 +1195,62 @@ void Image::prepareForSampling(const VkImageSubresourceRange &subresourceRange)
 	}
 
 	// First, decompress all relevant dirty subregions
-	for(subresource.arrayLayer = subresourceRange.baseArrayLayer;
-	    subresource.arrayLayer <= lastLayer;
-	    subresource.arrayLayer++)
+	if(decompressedImage)
 	{
 		for(subresource.mipLevel = subresourceRange.baseMipLevel;
 		    subresource.mipLevel <= lastMipLevel;
 		    subresource.mipLevel++)
 		{
-			auto it = dirtySubresources.find(subresource);
-			if(it != dirtySubresources.end())
+			for(subresource.arrayLayer = subresourceRange.baseArrayLayer;
+			    subresource.arrayLayer <= lastLayer;
+			    subresource.arrayLayer++)
 			{
-				decompress(subresource);
+				auto it = dirtySubresources.find(subresource);
+				if(it != dirtySubresources.end())
+				{
+					decompress(subresource);
+				}
 			}
 		}
 	}
 
 	// Second, update cubemap borders
-	for(subresource.arrayLayer = subresourceRange.baseArrayLayer;
-	    subresource.arrayLayer <= lastLayer;
-	    subresource.arrayLayer++)
+	if(isCubeCompatible())
 	{
 		for(subresource.mipLevel = subresourceRange.baseMipLevel;
 		    subresource.mipLevel <= lastMipLevel;
 		    subresource.mipLevel++)
 		{
-			auto it = dirtySubresources.find(subresource);
-			if(it != dirtySubresources.end())
+			for(subresource.arrayLayer = subresourceRange.baseArrayLayer;
+			    subresource.arrayLayer <= lastLayer;
+			    subresource.arrayLayer++)
 			{
-				if(updateCube(subresource))
+				auto it = dirtySubresources.find(subresource);
+				if(it != dirtySubresources.end())
 				{
-					// updateCube() updates all layers of all cubemaps at once, so remove entries to avoid duplicating effort
-					VkImageSubresource cleanSubresource = subresource;
-					for(cleanSubresource.arrayLayer = 0; cleanSubresource.arrayLayer < arrayLayers - 5;)
+					// Since cube faces affect each other's borders, we update all 6 layers.
+
+					subresource.arrayLayer -= subresource.arrayLayer % 6;  // Round down to a multiple of 6.
+
+					if(subresource.arrayLayer + 5 <= lastLayer)
 					{
-						// Delete one cube's worth of dirty subregions
-						for(uint32_t i = 0; i < 6; i++, cleanSubresource.arrayLayer++)
-						{
-							auto it = dirtySubresources.find(cleanSubresource);
-							if(it != dirtySubresources.end())
-							{
-								dirtySubresources.erase(it);
-							}
-						}
+						device->getBlitter()->updateBorders(decompressedImage ? decompressedImage : this, subresource);
 					}
+
+					subresource.arrayLayer += 5;  // Together with the loop increment, advances to the next cube.
 				}
 			}
 		}
 	}
 
 	// Finally, mark all updated subregions clean
-	for(subresource.arrayLayer = subresourceRange.baseArrayLayer;
-	    subresource.arrayLayer <= lastLayer;
-	    subresource.arrayLayer++)
+	for(subresource.mipLevel = subresourceRange.baseMipLevel;
+	    subresource.mipLevel <= lastMipLevel;
+	    subresource.mipLevel++)
 	{
-		for(subresource.mipLevel = subresourceRange.baseMipLevel;
-		    subresource.mipLevel <= lastMipLevel;
-		    subresource.mipLevel++)
+		for(subresource.arrayLayer = subresourceRange.baseArrayLayer;
+		    subresource.arrayLayer <= lastLayer;
+		    subresource.arrayLayer++)
 		{
 			auto it = dirtySubresources.find(subresource);
 			if(it != dirtySubresources.end())
@@ -1225,98 +1261,77 @@ void Image::prepareForSampling(const VkImageSubresourceRange &subresourceRange)
 	}
 }
 
-void Image::decompress(const VkImageSubresource &subresource)
+void Image::decompress(const VkImageSubresource &subresource) const
 {
-	if(decompressedImage)
+	switch(format)
 	{
-		switch(format)
-		{
-		case VK_FORMAT_EAC_R11_UNORM_BLOCK:
-		case VK_FORMAT_EAC_R11_SNORM_BLOCK:
-		case VK_FORMAT_EAC_R11G11_UNORM_BLOCK:
-		case VK_FORMAT_EAC_R11G11_SNORM_BLOCK:
-		case VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK:
-		case VK_FORMAT_ETC2_R8G8B8_SRGB_BLOCK:
-		case VK_FORMAT_ETC2_R8G8B8A1_UNORM_BLOCK:
-		case VK_FORMAT_ETC2_R8G8B8A1_SRGB_BLOCK:
-		case VK_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK:
-		case VK_FORMAT_ETC2_R8G8B8A8_SRGB_BLOCK:
-			decodeETC2(subresource);
-			break;
-		case VK_FORMAT_BC1_RGB_UNORM_BLOCK:
-		case VK_FORMAT_BC1_RGB_SRGB_BLOCK:
-		case VK_FORMAT_BC1_RGBA_UNORM_BLOCK:
-		case VK_FORMAT_BC1_RGBA_SRGB_BLOCK:
-		case VK_FORMAT_BC2_UNORM_BLOCK:
-		case VK_FORMAT_BC2_SRGB_BLOCK:
-		case VK_FORMAT_BC3_UNORM_BLOCK:
-		case VK_FORMAT_BC3_SRGB_BLOCK:
-		case VK_FORMAT_BC4_UNORM_BLOCK:
-		case VK_FORMAT_BC4_SNORM_BLOCK:
-		case VK_FORMAT_BC5_UNORM_BLOCK:
-		case VK_FORMAT_BC5_SNORM_BLOCK:
-		case VK_FORMAT_BC6H_UFLOAT_BLOCK:
-		case VK_FORMAT_BC6H_SFLOAT_BLOCK:
-		case VK_FORMAT_BC7_UNORM_BLOCK:
-		case VK_FORMAT_BC7_SRGB_BLOCK:
-			decodeBC(subresource);
-			break;
-		case VK_FORMAT_ASTC_4x4_UNORM_BLOCK:
-		case VK_FORMAT_ASTC_5x4_UNORM_BLOCK:
-		case VK_FORMAT_ASTC_5x5_UNORM_BLOCK:
-		case VK_FORMAT_ASTC_6x5_UNORM_BLOCK:
-		case VK_FORMAT_ASTC_6x6_UNORM_BLOCK:
-		case VK_FORMAT_ASTC_8x5_UNORM_BLOCK:
-		case VK_FORMAT_ASTC_8x6_UNORM_BLOCK:
-		case VK_FORMAT_ASTC_8x8_UNORM_BLOCK:
-		case VK_FORMAT_ASTC_10x5_UNORM_BLOCK:
-		case VK_FORMAT_ASTC_10x6_UNORM_BLOCK:
-		case VK_FORMAT_ASTC_10x8_UNORM_BLOCK:
-		case VK_FORMAT_ASTC_10x10_UNORM_BLOCK:
-		case VK_FORMAT_ASTC_12x10_UNORM_BLOCK:
-		case VK_FORMAT_ASTC_12x12_UNORM_BLOCK:
-		case VK_FORMAT_ASTC_4x4_SRGB_BLOCK:
-		case VK_FORMAT_ASTC_5x4_SRGB_BLOCK:
-		case VK_FORMAT_ASTC_5x5_SRGB_BLOCK:
-		case VK_FORMAT_ASTC_6x5_SRGB_BLOCK:
-		case VK_FORMAT_ASTC_6x6_SRGB_BLOCK:
-		case VK_FORMAT_ASTC_8x5_SRGB_BLOCK:
-		case VK_FORMAT_ASTC_8x6_SRGB_BLOCK:
-		case VK_FORMAT_ASTC_8x8_SRGB_BLOCK:
-		case VK_FORMAT_ASTC_10x5_SRGB_BLOCK:
-		case VK_FORMAT_ASTC_10x6_SRGB_BLOCK:
-		case VK_FORMAT_ASTC_10x8_SRGB_BLOCK:
-		case VK_FORMAT_ASTC_10x10_SRGB_BLOCK:
-		case VK_FORMAT_ASTC_12x10_SRGB_BLOCK:
-		case VK_FORMAT_ASTC_12x12_SRGB_BLOCK:
-			decodeASTC(subresource);
-			break;
-		default:
-			break;
-		}
+	case VK_FORMAT_EAC_R11_UNORM_BLOCK:
+	case VK_FORMAT_EAC_R11_SNORM_BLOCK:
+	case VK_FORMAT_EAC_R11G11_UNORM_BLOCK:
+	case VK_FORMAT_EAC_R11G11_SNORM_BLOCK:
+	case VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK:
+	case VK_FORMAT_ETC2_R8G8B8_SRGB_BLOCK:
+	case VK_FORMAT_ETC2_R8G8B8A1_UNORM_BLOCK:
+	case VK_FORMAT_ETC2_R8G8B8A1_SRGB_BLOCK:
+	case VK_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK:
+	case VK_FORMAT_ETC2_R8G8B8A8_SRGB_BLOCK:
+		decodeETC2(subresource);
+		break;
+	case VK_FORMAT_BC1_RGB_UNORM_BLOCK:
+	case VK_FORMAT_BC1_RGB_SRGB_BLOCK:
+	case VK_FORMAT_BC1_RGBA_UNORM_BLOCK:
+	case VK_FORMAT_BC1_RGBA_SRGB_BLOCK:
+	case VK_FORMAT_BC2_UNORM_BLOCK:
+	case VK_FORMAT_BC2_SRGB_BLOCK:
+	case VK_FORMAT_BC3_UNORM_BLOCK:
+	case VK_FORMAT_BC3_SRGB_BLOCK:
+	case VK_FORMAT_BC4_UNORM_BLOCK:
+	case VK_FORMAT_BC4_SNORM_BLOCK:
+	case VK_FORMAT_BC5_UNORM_BLOCK:
+	case VK_FORMAT_BC5_SNORM_BLOCK:
+	case VK_FORMAT_BC6H_UFLOAT_BLOCK:
+	case VK_FORMAT_BC6H_SFLOAT_BLOCK:
+	case VK_FORMAT_BC7_UNORM_BLOCK:
+	case VK_FORMAT_BC7_SRGB_BLOCK:
+		decodeBC(subresource);
+		break;
+	case VK_FORMAT_ASTC_4x4_UNORM_BLOCK:
+	case VK_FORMAT_ASTC_5x4_UNORM_BLOCK:
+	case VK_FORMAT_ASTC_5x5_UNORM_BLOCK:
+	case VK_FORMAT_ASTC_6x5_UNORM_BLOCK:
+	case VK_FORMAT_ASTC_6x6_UNORM_BLOCK:
+	case VK_FORMAT_ASTC_8x5_UNORM_BLOCK:
+	case VK_FORMAT_ASTC_8x6_UNORM_BLOCK:
+	case VK_FORMAT_ASTC_8x8_UNORM_BLOCK:
+	case VK_FORMAT_ASTC_10x5_UNORM_BLOCK:
+	case VK_FORMAT_ASTC_10x6_UNORM_BLOCK:
+	case VK_FORMAT_ASTC_10x8_UNORM_BLOCK:
+	case VK_FORMAT_ASTC_10x10_UNORM_BLOCK:
+	case VK_FORMAT_ASTC_12x10_UNORM_BLOCK:
+	case VK_FORMAT_ASTC_12x12_UNORM_BLOCK:
+	case VK_FORMAT_ASTC_4x4_SRGB_BLOCK:
+	case VK_FORMAT_ASTC_5x4_SRGB_BLOCK:
+	case VK_FORMAT_ASTC_5x5_SRGB_BLOCK:
+	case VK_FORMAT_ASTC_6x5_SRGB_BLOCK:
+	case VK_FORMAT_ASTC_6x6_SRGB_BLOCK:
+	case VK_FORMAT_ASTC_8x5_SRGB_BLOCK:
+	case VK_FORMAT_ASTC_8x6_SRGB_BLOCK:
+	case VK_FORMAT_ASTC_8x8_SRGB_BLOCK:
+	case VK_FORMAT_ASTC_10x5_SRGB_BLOCK:
+	case VK_FORMAT_ASTC_10x6_SRGB_BLOCK:
+	case VK_FORMAT_ASTC_10x8_SRGB_BLOCK:
+	case VK_FORMAT_ASTC_10x10_SRGB_BLOCK:
+	case VK_FORMAT_ASTC_12x10_SRGB_BLOCK:
+	case VK_FORMAT_ASTC_12x12_SRGB_BLOCK:
+		decodeASTC(subresource);
+		break;
+	default:
+		UNSUPPORTED("Compressed format %d", (VkFormat)format);
+		break;
 	}
 }
 
-bool Image::updateCube(const VkImageSubresource &subres)
-{
-	if(isCube() && (arrayLayers >= 6))
-	{
-		VkImageSubresource subresource = subres;
-
-		// Update the borders of all the groups of 6 layers that can be part of a cubemaps but don't
-		// touch leftover layers that cannot be part of cubemaps.
-		for(subresource.arrayLayer = 0; subresource.arrayLayer < arrayLayers - 5; subresource.arrayLayer += 6)
-		{
-			device->getBlitter()->updateBorders(decompressedImage ? decompressedImage : this, subresource);
-		}
-
-		return true;
-	}
-
-	return false;
-}
-
-void Image::decodeETC2(const VkImageSubresource &subresource)
+void Image::decodeETC2(const VkImageSubresource &subresource) const
 {
 	ASSERT(decompressedImage);
 
@@ -1354,7 +1369,7 @@ void Image::decodeETC2(const VkImageSubresource &subresource)
 	}
 }
 
-void Image::decodeBC(const VkImageSubresource &subresource)
+void Image::decodeBC(const VkImageSubresource &subresource) const
 {
 	ASSERT(decompressedImage);
 
@@ -1377,7 +1392,7 @@ void Image::decodeBC(const VkImageSubresource &subresource)
 	}
 }
 
-void Image::decodeASTC(const VkImageSubresource &subresource)
+void Image::decodeASTC(const VkImageSubresource &subresource) const
 {
 	ASSERT(decompressedImage);
 

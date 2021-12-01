@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "VkQueue.hpp"
+
 #include "VkCommandBuffer.hpp"
 #include "VkFence.hpp"
 #include "VkSemaphore.hpp"
@@ -54,15 +55,22 @@ VkSubmitInfo *DeepCopySubmitInfo(uint32_t submitCount, const VkSubmitInfo *pSubm
 					totalSize += tlsSubmitInfo->signalSemaphoreValueCount * sizeof(uint64_t);
 				}
 				break;
+			case VK_STRUCTURE_TYPE_DEVICE_GROUP_SUBMIT_INFO:
+				// SwiftShader doesn't use device group submit info because it only supports a single physical device.
+				// However, this extension is core in Vulkan 1.1, so we must treat it as a valid structure type.
+				break;
+			case VK_STRUCTURE_TYPE_MAX_ENUM:
+				// dEQP tests that this value is ignored.
+				break;
 			default:
-				WARN("submitInfo[%d]->pNext sType: %s", i, vk::Stringify(extension->sType).c_str());
+				UNSUPPORTED("submitInfo[%d]->pNext sType: %s", i, vk::Stringify(extension->sType).c_str());
 				break;
 			}
 		}
 	}
 
 	uint8_t *mem = static_cast<uint8_t *>(
-	    vk::allocate(totalSize, vk::REQUIRED_MEMORY_ALIGNMENT, vk::DEVICE_MEMORY, vk::Fence::GetAllocationScope()));
+	    vk::allocateHostMemory(totalSize, vk::REQUIRED_MEMORY_ALIGNMENT, vk::NULL_ALLOCATION_CALLBACKS, vk::Fence::GetAllocationScope()));
 
 	auto submits = new(mem) VkSubmitInfo[submitCount];
 	memcpy(mem, pSubmits, submitSize);
@@ -119,8 +127,15 @@ VkSubmitInfo *DeepCopySubmitInfo(uint32_t submitCount, const VkSubmitInfo *pSubm
 					submits[i].pNext = tlsSubmitInfoCopy;
 				}
 				break;
+			case VK_STRUCTURE_TYPE_DEVICE_GROUP_SUBMIT_INFO:
+				// SwiftShader doesn't use device group submit info because it only supports a single physical device.
+				// However, this extension is core in Vulkan 1.1, so we must treat it as a valid structure type.
+				break;
+			case VK_STRUCTURE_TYPE_MAX_ENUM:
+				// dEQP tests that this value is ignored.
+				break;
 			default:
-				WARN("submitInfo[%d]->pNext sType: %s", i, vk::Stringify(extension->sType).c_str());
+				UNSUPPORTED("submitInfo[%d]->pNext sType: %s", i, vk::Stringify(extension->sType).c_str());
 				break;
 			}
 		}
@@ -188,8 +203,15 @@ void Queue::submitQueue(const Task &task)
 			case VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO:
 				timelineInfo = reinterpret_cast<const VkTimelineSemaphoreSubmitInfo *>(submitInfo.pNext);
 				break;
+			case VK_STRUCTURE_TYPE_MAX_ENUM:
+				// dEQP tests that this value is ignored.
+				break;
+			case VK_STRUCTURE_TYPE_DEVICE_GROUP_SUBMIT_INFO:
+				// SwiftShader doesn't use device group submit info because it only supports a single physical device.
+				// However, this extension is core in Vulkan 1.1, so we must treat it as a valid structure type.
+				break;
 			default:
-				WARN("submitInfo.pNext->sType = %s", vk::Stringify(nextInfo->sType).c_str());
+				UNSUPPORTED("submitInfo.pNext->sType = %s", vk::Stringify(nextInfo->sType).c_str());
 				break;
 			}
 		}
@@ -303,7 +325,7 @@ void Queue::garbageCollect()
 	{
 		auto v = toDelete.tryTake();
 		if(!v.second) { break; }
-		vk::deallocate(v.first, DEVICE_MEMORY);
+		vk::freeHostMemory(v.first, NULL_ALLOCATION_CALLBACKS);
 	}
 }
 
