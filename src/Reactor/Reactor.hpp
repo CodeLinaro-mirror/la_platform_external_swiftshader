@@ -2180,7 +2180,7 @@ RValue<Float> Rcp_pp(RValue<Float> val, bool exactAtPow2 = false);
 // Deprecated: use RcpSqrt
 // TODO(b/147516027): Remove when GLES frontend is removed
 RValue<Float> RcpSqrt_pp(RValue<Float> val);
-RValue<Float> Rcp(RValue<Float> x, Precision p = Precision::Full, bool finite = false, bool exactAtPow2 = false);
+RValue<Float> Rcp(RValue<Float> x, Precision p = Precision::Full, bool exactAtPow2 = false);
 RValue<Float> RcpSqrt(RValue<Float> x, Precision p = Precision::Full);
 RValue<Float> Sqrt(RValue<Float> x);
 
@@ -2351,7 +2351,7 @@ RValue<Float4> Rcp_pp(RValue<Float4> val, bool exactAtPow2 = false);
 // Deprecated: use RcpSqrt
 // TODO(b/147516027): Remove when GLES frontend is removed
 RValue<Float4> RcpSqrt_pp(RValue<Float4> val);
-RValue<Float4> Rcp(RValue<Float4> x, Precision p = Precision::Full, bool finite = false, bool exactAtPow2 = false);
+RValue<Float4> Rcp(RValue<Float4> x, Precision p = Precision::Full, bool exactAtPow2 = false);
 RValue<Float4> RcpSqrt(RValue<Float4> x, Precision p = Precision::Full);
 RValue<Float4> Sqrt(RValue<Float4> x);
 RValue<Float4> Insert(RValue<Float4> val, RValue<Float> element, int i);
@@ -2477,11 +2477,11 @@ public:
 	RValue<Pointer<T>> operator=(const Reference<Pointer<T>> &rhs);
 	RValue<Pointer<T>> operator=(std::nullptr_t);
 
-	Reference<T> operator*();
-	Reference<T> operator[](int index);
-	Reference<T> operator[](unsigned int index);
-	Reference<T> operator[](RValue<Int> index);
-	Reference<T> operator[](RValue<UInt> index);
+	Reference<T> operator*() const;
+	Reference<T> operator[](int index) const;
+	Reference<T> operator[](unsigned int index) const;
+	Reference<T> operator[](RValue<Int> index) const;
+	Reference<T> operator[](RValue<UInt> index) const;
 
 	static Type *type();
 
@@ -3034,13 +3034,13 @@ RValue<Pointer<T>> Pointer<T>::operator=(std::nullptr_t)
 }
 
 template<class T>
-Reference<T> Pointer<T>::operator*()
+Reference<T> Pointer<T>::operator*() const
 {
 	return Reference<T>(this->loadValue(), alignment);
 }
 
 template<class T>
-Reference<T> Pointer<T>::operator[](int index)
+Reference<T> Pointer<T>::operator[](int index) const
 {
 	RR_DEBUG_INFO_UPDATE_LOC();
 	Value *element = Nucleus::createGEP(this->loadValue(), T::type(), Nucleus::createConstantInt(index), false);
@@ -3049,7 +3049,7 @@ Reference<T> Pointer<T>::operator[](int index)
 }
 
 template<class T>
-Reference<T> Pointer<T>::operator[](unsigned int index)
+Reference<T> Pointer<T>::operator[](unsigned int index) const
 {
 	RR_DEBUG_INFO_UPDATE_LOC();
 	Value *element = Nucleus::createGEP(this->loadValue(), T::type(), Nucleus::createConstantInt(index), true);
@@ -3058,7 +3058,7 @@ Reference<T> Pointer<T>::operator[](unsigned int index)
 }
 
 template<class T>
-Reference<T> Pointer<T>::operator[](RValue<Int> index)
+Reference<T> Pointer<T>::operator[](RValue<Int> index) const
 {
 	RR_DEBUG_INFO_UPDATE_LOC();
 	Value *element = Nucleus::createGEP(this->loadValue(), T::type(), index.value(), false);
@@ -3067,7 +3067,7 @@ Reference<T> Pointer<T>::operator[](RValue<Int> index)
 }
 
 template<class T>
-Reference<T> Pointer<T>::operator[](RValue<UInt> index)
+Reference<T> Pointer<T>::operator[](RValue<UInt> index) const
 {
 	RR_DEBUG_INFO_UPDATE_LOC();
 	Value *element = Nucleus::createGEP(this->loadValue(), T::type(), index.value(), true);

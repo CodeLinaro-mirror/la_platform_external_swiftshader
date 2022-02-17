@@ -26,7 +26,6 @@
 namespace sw {
 
 SpirvShader::SpirvShader(
-    uint32_t codeSerialID,
     VkShaderStageFlagBits pipelineStage,
     const char *entryPointName,
     SpirvBinary const &insns,
@@ -37,7 +36,6 @@ SpirvShader::SpirvShader(
     : insns{ insns }
     , inputs{ MAX_INTERFACE_COMPONENTS }
     , outputs{ MAX_INTERFACE_COMPONENTS }
-    , codeSerialID(codeSerialID)
     , robustBufferAccess(robustBufferAccess)
 {
 	ASSERT(insns.size() > 0);
@@ -167,8 +165,21 @@ SpirvShader::SpirvShader(
 			break;
 
 		case spv::OpDecorateString:
+			{
+				auto decoration = static_cast<spv::Decoration>(insn.word(2));
+
+				// We assume these are for HLSL semantics, ignore them (b/214576937).
+				ASSERT(decoration == spv::DecorationUserSemantic || decoration == spv::DecorationUserTypeGOOGLE);
+			}
+			break;
+
 		case spv::OpMemberDecorateString:
-			// We assume these are for HLSL semantics, ignore them.
+			{
+				auto decoration = static_cast<spv::Decoration>(insn.word(3));
+
+				// We assume these are for HLSL semantics, ignore them (b/214576937).
+				ASSERT(decoration == spv::DecorationUserSemantic || decoration == spv::DecorationUserTypeGOOGLE);
+			}
 			break;
 
 		case spv::OpDecorationGroup:
@@ -209,7 +220,7 @@ SpirvShader::SpirvShader(
 
 		case spv::OpLabel:
 			{
-				ASSERT(currentBlock.value() == 0);
+				ASSERT(currentBlock == 0);
 				currentBlock = Block::ID(insn.word(1));
 				blockStart = insn;
 			}
@@ -226,8 +237,8 @@ SpirvShader::SpirvShader(
 		case spv::OpKill:
 		case spv::OpUnreachable:
 			{
-				ASSERT(currentBlock.value() != 0);
-				ASSERT(currentFunction.value() != 0);
+				ASSERT(currentBlock != 0);
+				ASSERT(currentFunction != 0);
 
 				auto blockEnd = insn;
 				blockEnd++;
@@ -411,6 +422,7 @@ SpirvShader::SpirvShader(
 				case spv::CapabilityImageQuery: capabilities.ImageQuery = true; break;
 				case spv::CapabilityDerivativeControl: capabilities.DerivativeControl = true; break;
 				case spv::CapabilityInterpolationFunction: capabilities.InterpolationFunction = true; break;
+				case spv::CapabilityStorageImageWriteWithoutFormat: capabilities.StorageImageWriteWithoutFormat = true; break;
 				case spv::CapabilityGroupNonUniform: capabilities.GroupNonUniform = true; break;
 				case spv::CapabilityGroupNonUniformVote: capabilities.GroupNonUniformVote = true; break;
 				case spv::CapabilityGroupNonUniformArithmetic: capabilities.GroupNonUniformArithmetic = true; break;
@@ -420,6 +432,8 @@ SpirvShader::SpirvShader(
 				case spv::CapabilityDeviceGroup: capabilities.DeviceGroup = true; break;
 				case spv::CapabilityMultiView: capabilities.MultiView = true; break;
 				case spv::CapabilityStencilExportEXT: capabilities.StencilExportEXT = true; break;
+				case spv::CapabilityVulkanMemoryModel: capabilities.VulkanMemoryModel = true; break;
+				case spv::CapabilityVulkanMemoryModelDeviceScope: capabilities.VulkanMemoryModelDeviceScope = true; break;
 				default:
 					UNSUPPORTED("Unsupported capability %u", insn.word(1));
 				}
@@ -429,7 +443,11 @@ SpirvShader::SpirvShader(
 			break;
 
 		case spv::OpMemoryModel:
-			break;  // Memory model does not affect our code generation until we decide to do Vulkan Memory Model support.
+			{
+				addressingModel = static_cast<spv::AddressingModel>(insn.word(1));
+				memoryModel = static_cast<spv::MemoryModel>(insn.word(2));
+			}
+			break;
 
 		case spv::OpFunction:
 			{
@@ -746,7 +764,7 @@ SpirvShader::SpirvShader(
 
 		case spv::OpExtension:
 			{
-				auto ext = insn.string(1);
+				const char *ext = insn.string(1);
 				// Part of core SPIR-V 1.3. Vulkan 1.1 implementations must also accept the pre-1.3
 				// extension per Appendix A, `Vulkan Environment for SPIR-V`.
 				if(!strcmp(ext, "SPV_KHR_storage_buffer_storage_class")) break;
@@ -757,6 +775,10 @@ SpirvShader::SpirvShader(
 				if(!strcmp(ext, "SPV_KHR_multiview")) break;
 				if(!strcmp(ext, "SPV_EXT_shader_stencil_export")) break;
 				if(!strcmp(ext, "SPV_KHR_float_controls")) break;
+				if(!strcmp(ext, "SPV_KHR_vulkan_memory_model")) break;
+				if(!strcmp(ext, "SPV_GOOGLE_decorate_string")) break;
+				if(!strcmp(ext, "SPV_GOOGLE_hlsl_functionality1")) break;
+				if(!strcmp(ext, "SPV_GOOGLE_user_type")) break;
 				UNSUPPORTED("SPIR-V Extension: %s", ext);
 			}
 			break;
@@ -931,6 +953,24 @@ uint32_t SpirvShader::GetNumInputComponents(int32_t location) const
 	}
 
 	return num_components_per_input;
+}
+
+uint32_t SpirvShader::GetPackedInterpolant(int32_t location) const
+{
+	ASSERT(location >= 0);
+	const uint32_t maxInterpolant = (location << 2);
+
+	// Return the number of used components only at location
+	uint32_t packedInterpolant = 0;
+	for(uint32_t i = 0; i < maxInterpolant; ++i)
+	{
+		if(inputs[i].Type != ATTRIBTYPE_UNUSED)
+		{
+			++packedInterpolant;
+		}
+	}
+
+	return packedInterpolant;
 }
 
 void SpirvShader::ProcessExecutionMode(InsnIterator insn)
@@ -1624,19 +1664,24 @@ void SpirvShader::emitProlog(SpirvRoutine *routine) const
 			}
 			break;
 
-		case spv::OpImageDrefGather:
+		case spv::OpImageSampleImplicitLod:
+		case spv::OpImageSampleExplicitLod:
+		case spv::OpImageSampleDrefImplicitLod:
+		case spv::OpImageSampleDrefExplicitLod:
+		case spv::OpImageSampleProjImplicitLod:
+		case spv::OpImageSampleProjExplicitLod:
+		case spv::OpImageSampleProjDrefImplicitLod:
+		case spv::OpImageSampleProjDrefExplicitLod:
 		case spv::OpImageFetch:
 		case spv::OpImageGather:
+		case spv::OpImageDrefGather:
+		case spv::OpImageWrite:
 		case spv::OpImageQueryLod:
-		case spv::OpImageSampleDrefExplicitLod:
-		case spv::OpImageSampleDrefImplicitLod:
-		case spv::OpImageSampleExplicitLod:
-		case spv::OpImageSampleImplicitLod:
-		case spv::OpImageSampleProjDrefExplicitLod:
-		case spv::OpImageSampleProjDrefImplicitLod:
-		case spv::OpImageSampleProjExplicitLod:
-		case spv::OpImageSampleProjImplicitLod:
-			routine->samplerCache.emplace(insn.resultId(), SpirvRoutine::SamplerCache{});
+			{
+				// The 'inline' sampler caches must be created in the prolog to initialize the tags.
+				uint32_t instructionPosition = insn.distanceFrom(this->begin());
+				routine->samplerCache.emplace(instructionPosition, SpirvRoutine::SamplerCache{});
+			}
 			break;
 
 		default:
@@ -1960,46 +2005,24 @@ SpirvShader::EmitResult SpirvShader::EmitInstruction(InsnIterator insn, EmitStat
 		return EmitKill(insn, state);
 
 	case spv::OpImageSampleImplicitLod:
-		return EmitImageSampleImplicitLod(None, insn, state);
-
 	case spv::OpImageSampleExplicitLod:
-		return EmitImageSampleExplicitLod(None, insn, state);
-
 	case spv::OpImageSampleDrefImplicitLod:
-		return EmitImageSampleImplicitLod(Dref, insn, state);
-
 	case spv::OpImageSampleDrefExplicitLod:
-		return EmitImageSampleExplicitLod(Dref, insn, state);
-
 	case spv::OpImageSampleProjImplicitLod:
-		return EmitImageSampleImplicitLod(Proj, insn, state);
-
 	case spv::OpImageSampleProjExplicitLod:
-		return EmitImageSampleExplicitLod(Proj, insn, state);
-
 	case spv::OpImageSampleProjDrefImplicitLod:
-		return EmitImageSampleImplicitLod(ProjDref, insn, state);
-
 	case spv::OpImageSampleProjDrefExplicitLod:
-		return EmitImageSampleExplicitLod(ProjDref, insn, state);
-
 	case spv::OpImageGather:
-		return EmitImageGather(None, insn, state);
-
 	case spv::OpImageDrefGather:
-		return EmitImageGather(Dref, insn, state);
-
 	case spv::OpImageFetch:
-		return EmitImageFetch(insn, state);
+	case spv::OpImageQueryLod:
+		return EmitImageSample(ImageInstruction(insn, *this), state);
 
 	case spv::OpImageQuerySizeLod:
 		return EmitImageQuerySizeLod(insn, state);
 
 	case spv::OpImageQuerySize:
 		return EmitImageQuerySize(insn, state);
-
-	case spv::OpImageQueryLod:
-		return EmitImageQueryLod(insn, state);
 
 	case spv::OpImageQueryLevels:
 		return EmitImageQueryLevels(insn, state);
@@ -2008,13 +2031,13 @@ SpirvShader::EmitResult SpirvShader::EmitInstruction(InsnIterator insn, EmitStat
 		return EmitImageQuerySamples(insn, state);
 
 	case spv::OpImageRead:
-		return EmitImageRead(insn, state);
+		return EmitImageRead(ImageInstruction(insn, *this), state);
 
 	case spv::OpImageWrite:
-		return EmitImageWrite(insn, state);
+		return EmitImageWrite(ImageInstruction(insn, *this), state);
 
 	case spv::OpImageTexelPointer:
-		return EmitImageTexelPointer(insn, state);
+		return EmitImageTexelPointer(ImageInstruction(insn, *this), state);
 
 	case spv::OpSampledImage:
 	case spv::OpImage:
@@ -2182,7 +2205,7 @@ SpirvShader::EmitResult SpirvShader::EmitVectorShuffle(InsnIterator insn, EmitSt
 
 	// Note: number of components in result type, first half type, and second
 	// half type are all independent.
-	auto &firstHalfType = getType(getObject(insn.word(3)));
+	auto &firstHalfType = getObjectType(insn.word(3));
 
 	Operand firstHalfAccess(this, state, insn.word(3));
 	Operand secondHalfAccess(this, state, insn.word(4));
@@ -2213,7 +2236,7 @@ SpirvShader::EmitResult SpirvShader::EmitVectorExtractDynamic(InsnIterator insn,
 {
 	auto &type = getType(insn.resultTypeId());
 	auto &dst = state->createIntermediate(insn.resultId(), type.componentCount);
-	auto &srcType = getType(getObject(insn.word(3)));
+	auto &srcType = getObjectType(insn.word(3));
 
 	Operand src(this, state, insn.word(3));
 	Operand index(this, state, insn.word(4));
@@ -2274,7 +2297,7 @@ SpirvShader::EmitResult SpirvShader::EmitAny(InsnIterator insn, EmitState *state
 	auto &type = getType(insn.resultTypeId());
 	ASSERT(type.componentCount == 1);
 	auto &dst = state->createIntermediate(insn.resultId(), type.componentCount);
-	auto &srcType = getType(getObject(insn.word(3)));
+	auto &srcType = getObjectType(insn.word(3));
 	auto src = Operand(this, state, insn.word(3));
 
 	SIMD::UInt result = src.UInt(0);
@@ -2293,7 +2316,7 @@ SpirvShader::EmitResult SpirvShader::EmitAll(InsnIterator insn, EmitState *state
 	auto &type = getType(insn.resultTypeId());
 	ASSERT(type.componentCount == 1);
 	auto &dst = state->createIntermediate(insn.resultId(), type.componentCount);
-	auto &srcType = getType(getObject(insn.word(3)));
+	auto &srcType = getObjectType(insn.word(3));
 	auto src = Operand(this, state, insn.word(3));
 
 	SIMD::UInt result = src.UInt(0);
@@ -2438,7 +2461,7 @@ SpirvShader::EmitResult SpirvShader::EmitArrayLength(InsnIterator insn, EmitStat
 	ASSERT(resultType.componentCount == 1);
 	ASSERT(resultType.definition.opcode() == spv::OpTypeInt);
 
-	auto &structPtrTy = getType(getObject(structPtrId));
+	auto &structPtrTy = getObjectType(structPtrId);
 	auto &structTy = getType(structPtrTy.element);
 	auto arrayId = Type::ID(structTy.definition.word(2 + arrayFieldIdx));
 
@@ -2566,16 +2589,16 @@ SpirvShader::Operand::Operand(const Intermediate &value)
 {
 }
 
-bool SpirvShader::Operand::isConstantZero() const
+bool SpirvShader::Object::isConstantZero() const
 {
-	if(!constant)
+	if(kind != Kind::Constant)
 	{
 		return false;
 	}
 
-	for(uint32_t i = 0; i < componentCount; i++)
+	for(uint32_t i = 0; i < constantValue.size(); i++)
 	{
-		if(constant[i] != 0)
+		if(constantValue[i] != 0)
 		{
 			return false;
 		}

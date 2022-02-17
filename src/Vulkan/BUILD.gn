@@ -20,7 +20,6 @@ import("vulkan.gni")
 config("swiftshader_libvulkan_private_config") {
   if (is_linux || is_chromeos) {
     defines = [
-      "VK_USE_PLATFORM_XLIB_KHR",
       "VK_USE_PLATFORM_XCB_KHR",
       "VK_EXPORT=__attribute__((visibility(\"default\")))",
     ]
@@ -53,7 +52,6 @@ config("swiftshader_libvulkan_private_config") {
 
   defines += [
      "SWIFTSHADER_ENABLE_ASTC",  # TODO(b/150130101)
-     "SWIFTSHADER_ZERO_INITIALIZE_DEVICE_MEMORY",  # TODO(b/140991626)
   ]
 }
 
@@ -96,6 +94,7 @@ swiftshader_source_set("swiftshader_libvulkan_headers") {
     "VkShaderModule.hpp",
     "VkSpecializationInfo.hpp",
     "VkStringify.hpp",
+    "VkStructConversion.hpp",
     "VkTimelineSemaphore.hpp",
     "VulkanPlatform.hpp",
   ]
@@ -219,6 +218,8 @@ action("icd_file") {
     library_path = ".\\vk_swiftshader.dll"
   } else if (is_mac) {
     library_path = "./libvk_swiftshader.dylib"
+  } else if (is_fuchsia) {
+    library_path = "/pkg/lib/libvk_swiftshader.so"
   } else {
     library_path = "./libvk_swiftshader.so"
   }

@@ -222,9 +222,9 @@ Float4 power(RValue<Float4> x, RValue<Float4> y, bool pp)
 	return exponential2(log, pp);
 }
 
-Float4 reciprocal(RValue<Float4> x, bool pp, bool finite, bool exactAtPow2)
+Float4 reciprocal(RValue<Float4> x, bool pp, bool exactAtPow2)
 {
-	return Rcp(x, pp ? Precision::Relaxed : Precision::Full, finite, exactAtPow2);
+	return Rcp(x, pp ? Precision::Relaxed : Precision::Full, exactAtPow2);
 }
 
 Float4 reciprocalSquareRoot(RValue<Float4> x, bool absolute, bool pp)
@@ -292,7 +292,7 @@ Float4 sine(RValue<Float4> x, bool pp)
 		Float4 s1 = y * (y2 * (y2 * (y2 * Float4(-0.0046075748f) + Float4(0.0796819754f)) + Float4(-0.645963615f)) + Float4(1.5707963235f));
 		Float4 c2 = (c1 * c1) - (s1 * s1);
 		Float4 s2 = Float4(2.0f) * s1 * c1;
-		return Float4(2.0f) * s2 * c2 * reciprocal(s2 * s2 + c2 * c2, pp, true);
+		return Float4(2.0f) * s2 * c2 * reciprocal(s2 * s2 + c2 * c2);
 	}
 
 	const Float4 A = Float4(-16.0f);
@@ -454,21 +454,6 @@ Float4 arctanh(RValue<Float4> x, bool pp)
 	return logarithm((Float4(1.0f) + x) / (Float4(1.0f) - x), pp) * Float4(0.5f);
 }
 
-Float4 dot2(const Vector4f &v0, const Vector4f &v1)
-{
-	return v0.x * v1.x + v0.y * v1.y;
-}
-
-Float4 dot3(const Vector4f &v0, const Vector4f &v1)
-{
-	return v0.x * v1.x + v0.y * v1.y + v0.z * v1.z;
-}
-
-Float4 dot4(const Vector4f &v0, const Vector4f &v1)
-{
-	return v0.x * v1.x + v0.y * v1.y + v0.z * v1.z + v0.w * v1.w;
-}
-
 void transpose4x4(Short4 &row0, Short4 &row1, Short4 &row2, Short4 &row3)
 {
 	Int2 tmp0 = UnpackHigh(row0, row1);
@@ -628,46 +613,6 @@ UInt r11g11b10Pack(const Float4 &value)
 	return (UInt(truncBits.x) >> 20) | (UInt(truncBits.y) >> 9) | (UInt(truncBits.z) << 1);
 }
 
-Vector4s a2b10g10r10Unpack(const Int4 &value)
-{
-	Vector4s result;
-
-	result.x = Short4(value << 6) & Short4(0xFFC0u);
-	result.y = Short4(value >> 4) & Short4(0xFFC0u);
-	result.z = Short4(value >> 14) & Short4(0xFFC0u);
-	result.w = Short4(value >> 16) & Short4(0xC000u);
-
-	// Expand to 16 bit range
-	result.x |= As<Short4>(As<UShort4>(result.x) >> 10);
-	result.y |= As<Short4>(As<UShort4>(result.y) >> 10);
-	result.z |= As<Short4>(As<UShort4>(result.z) >> 10);
-	result.w |= As<Short4>(As<UShort4>(result.w) >> 2);
-	result.w |= As<Short4>(As<UShort4>(result.w) >> 4);
-	result.w |= As<Short4>(As<UShort4>(result.w) >> 8);
-
-	return result;
-}
-
-Vector4s a2r10g10b10Unpack(const Int4 &value)
-{
-	Vector4s result;
-
-	result.x = Short4(value >> 14) & Short4(0xFFC0u);
-	result.y = Short4(value >> 4) & Short4(0xFFC0u);
-	result.z = Short4(value << 6) & Short4(0xFFC0u);
-	result.w = Short4(value >> 16) & Short4(0xC000u);
-
-	// Expand to 16 bit range
-	result.x |= As<Short4>(As<UShort4>(result.x) >> 10);
-	result.y |= As<Short4>(As<UShort4>(result.y) >> 10);
-	result.z |= As<Short4>(As<UShort4>(result.z) >> 10);
-	result.w |= As<Short4>(As<UShort4>(result.w) >> 2);
-	result.w |= As<Short4>(As<UShort4>(result.w) >> 4);
-	result.w |= As<Short4>(As<UShort4>(result.w) >> 8);
-
-	return result;
-}
-
 rr::RValue<rr::Bool> AnyTrue(rr::RValue<sw::SIMD::Int> const &ints)
 {
 	return rr::SignMask(ints) != 0;
@@ -723,12 +668,13 @@ rr::RValue<sw::SIMD::UInt> Bitmask32(rr::RValue<sw::SIMD::UInt> const &bitCount)
 	return NthBit32(bitCount) - sw::SIMD::UInt(1);
 }
 
-// Performs a fused-multiply add, returning a * b + c.
+// Computes `a * b + c`, which may be fused into one operation to produce a higher-precision result.
 rr::RValue<sw::SIMD::Float> FMA(
     rr::RValue<sw::SIMD::Float> const &a,
     rr::RValue<sw::SIMD::Float> const &b,
     rr::RValue<sw::SIMD::Float> const &c)
 {
+	// TODO(b/214591655): Use FMA when available.
 	return a * b + c;
 }
 
@@ -1013,7 +959,7 @@ SIMD::Int Pointer::isInBounds(unsigned int accessSize, OutOfBoundsBehavior robus
 		    (staticOffsets[3] + accessSize - 1 < staticLimit) ? 0xffffffff : 0);
 	}
 
-	return CmpLT(offsets() + SIMD::Int(accessSize - 1), SIMD::Int(limit()));
+	return CmpGE(offsets(), SIMD::Int(0)) & CmpLT(offsets() + SIMD::Int(accessSize - 1), SIMD::Int(limit()));
 }
 
 bool Pointer::isStaticallyInBounds(unsigned int accessSize, OutOfBoundsBehavior robustness) const
