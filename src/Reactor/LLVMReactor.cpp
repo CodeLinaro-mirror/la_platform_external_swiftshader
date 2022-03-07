@@ -16,7 +16,6 @@
 
 #include "CPUID.hpp"
 #include "Debug.hpp"
-#include "EmulatedIntrinsics.hpp"
 #include "LLVMReactorDebugInfo.hpp"
 #include "Print.hpp"
 #include "Reactor.hpp"
@@ -26,6 +25,7 @@
 #include "llvm/IR/IntrinsicsX86.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Verifier.h"
+#include "llvm/Pass.h"
 #include "llvm/Support/Alignment.h"
 #include "llvm/Support/ManagedStatic.h"
 #include "llvm/Transforms/Coroutines.h"
@@ -126,14 +126,6 @@ llvm::Value *lowerPMOV(llvm::Value *op, llvm::Type *dstType, bool sext)
 
 	return sext ? jit->builder->CreateSExt(v, dstTy)
 	            : jit->builder->CreateZExt(v, dstTy);
-}
-
-llvm::Value *lowerPABS(llvm::Value *v)
-{
-	llvm::Value *zero = llvm::Constant::getNullValue(v->getType());
-	llvm::Value *cmp = jit->builder->CreateICmp(llvm::ICmpInst::ICMP_SGT, v, zero);
-	llvm::Value *neg = jit->builder->CreateNeg(v);
-	return jit->builder->CreateSelect(cmp, v, neg);
 }
 #endif  // defined(__i386__) || defined(__x86_64__)
 
@@ -385,14 +377,23 @@ llvm::Value *lowerMulHigh(llvm::Value *x, llvm::Value *y, bool sext)
 
 namespace rr {
 
-std::string BackendName()
+std::string Caps::backendName()
 {
 	return std::string("LLVM ") + LLVM_VERSION_STRING;
 }
 
-const Capabilities Caps = {
-	true,  // CoroutinesSupported
-};
+bool Caps::coroutinesSupported()
+{
+	return true;
+}
+
+bool Caps::fmaIsFast()
+{
+	static bool AVX2 = CPUID::supportsAVX2();  // Also checks for FMA support
+
+	// If x86 FMA instructions are supported, assume LLVM will emit them instead of making calls to std::fma().
+	return AVX2;
+}
 
 // The abstract Type* types are implemented as LLVM types, except that
 // 64-bit vectors are emulated using 128-bit ones to avoid use of MMX in x86
@@ -2705,6 +2706,17 @@ RValue<Int4> CmpNLE(RValue<Int4> x, RValue<Int4> y)
 	return RValue<Int4>(Nucleus::createSExt(Nucleus::createICmpSGT(x.value(), y.value()), Int4::type()));
 }
 
+RValue<Int4> Abs(RValue<Int4> x)
+{
+#if LLVM_VERSION_MAJOR >= 12
+	auto func = llvm::Intrinsic::getDeclaration(jit->module.get(), llvm::Intrinsic::abs, { V(x.value())->getType() });
+	return RValue<Int4>(V(jit->builder->CreateCall(func, { V(x.value()), llvm::ConstantInt::getFalse(*jit->context) })));
+#else
+	auto negative = x >> 31;
+	return (x ^ negative) - negative;
+#endif
+}
+
 RValue<Int4> Max(RValue<Int4> x, RValue<Int4> y)
 {
 	RR_DEBUG_INFO_UPDATE_LOC();
@@ -3156,6 +3168,24 @@ Float4::Float4(RValue<Float> rhs)
 	storeValue(replicate);
 }
 
+RValue<Float4> MulAdd(RValue<Float4> x, RValue<Float4> y, RValue<Float4> z)
+{
+	auto func = llvm::Intrinsic::getDeclaration(jit->module.get(), llvm::Intrinsic::fmuladd, { T(Float4::type()) });
+	return RValue<Float4>(V(jit->builder->CreateCall(func, { V(x.value()), V(y.value()), V(z.value()) })));
+}
+
+RValue<Float4> FMA(RValue<Float4> x, RValue<Float4> y, RValue<Float4> z)
+{
+	auto func = llvm::Intrinsic::getDeclaration(jit->module.get(), llvm::Intrinsic::fma, { T(Float4::type()) });
+	return RValue<Float4>(V(jit->builder->CreateCall(func, { V(x.value()), V(y.value()), V(z.value()) })));
+}
+
+RValue<Float4> Abs(RValue<Float4> x)
+{
+	auto func = llvm::Intrinsic::getDeclaration(jit->module.get(), llvm::Intrinsic::fabs, { V(x.value())->getType() });
+	return RValue<Float4>(V(jit->builder->CreateCall(func, V(x.value()))));
+}
+
 RValue<Float4> Max(RValue<Float4> x, RValue<Float4> y)
 {
 	RR_DEBUG_INFO_UPDATE_LOC();
@@ -3424,13 +3454,13 @@ static RValue<Float4> TransformFloat4PerElement(RValue<Float4> v, const char *na
 	return RValue<Float4>(V(out));
 }
 
-RValue<Float4> Asin(RValue<Float4> v, Precision p)
+RValue<Float4> Asin(RValue<Float4> v)
 {
 	RR_DEBUG_INFO_UPDATE_LOC();
 	return TransformFloat4PerElement(v, "asinf");
 }
 
-RValue<Float4> Acos(RValue<Float4> v, Precision p)
+RValue<Float4> Acos(RValue<Float4> v)
 {
 	RR_DEBUG_INFO_UPDATE_LOC();
 	return TransformFloat4PerElement(v, "acosf");
@@ -3445,13 +3475,13 @@ RValue<Float4> Atan(RValue<Float4> v)
 RValue<Float4> Sinh(RValue<Float4> v)
 {
 	RR_DEBUG_INFO_UPDATE_LOC();
-	return emulated::Sinh(v);
+	return TransformFloat4PerElement(v, "sinhf");
 }
 
 RValue<Float4> Cosh(RValue<Float4> v)
 {
 	RR_DEBUG_INFO_UPDATE_LOC();
-	return emulated::Cosh(v);
+	return TransformFloat4PerElement(v, "coshf");
 }
 
 RValue<Float4> Tanh(RValue<Float4> v)
@@ -3793,11 +3823,6 @@ RValue<Float4> floorps(RValue<Float4> val)
 RValue<Float4> ceilps(RValue<Float4> val)
 {
 	return roundps(val, 2);
-}
-
-RValue<Int4> pabsd(RValue<Int4> x)
-{
-	return RValue<Int4>(V(lowerPABS(V(x.value()))));
 }
 
 RValue<Short4> paddsw(RValue<Short4> x, RValue<Short4> y)
