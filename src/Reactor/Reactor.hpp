@@ -67,23 +67,12 @@ int DebugPrintf(const char *format, ...);
 
 namespace rr {
 
-// These generally map to the precision types as specified by the Vulkan specification.
-// See https://www.khronos.org/registry/vulkan/specs/1.2/html/chap37.html#spirvenv-precision-operation
-enum class Precision
+struct Caps
 {
-	/*Exact,*/  // 0 ULP with correct rounding (i.e. Math.h)
-	Full,       // Single precision, but not relaxed
-	Relaxed,    // Single precision, relaxed
-	/*Half,*/   // Half precision
+	static std::string backendName();
+	static bool coroutinesSupported();  // Support for rr::Coroutine<F>
+	static bool fmaIsFast();            // rr::FMA() is faster than `x * y + z`
 };
-
-std::string BackendName();
-
-struct Capabilities
-{
-	bool CoroutinesSupported;  // Support for rr::Coroutine<F>
-};
-extern const Capabilities Caps;
 
 class Bool;
 class Byte;
@@ -879,6 +868,7 @@ class Short4 : public LValue<Short4>
 public:
 	explicit Short4(RValue<Int> cast);
 	explicit Short4(RValue<Int4> cast);
+	explicit Short4(RValue<UInt4> cast);
 	//	explicit Short4(RValue<Float> cast);
 	explicit Short4(RValue<Float4> cast);
 
@@ -956,6 +946,7 @@ RValue<Short4> CmpEQ(RValue<Short4> x, RValue<Short4> y);
 class UShort4 : public LValue<UShort4>
 {
 public:
+	explicit UShort4(RValue<UInt4> cast);
 	explicit UShort4(RValue<Int4> cast);
 	explicit UShort4(RValue<Float4> cast, bool saturate = false);
 
@@ -2180,8 +2171,8 @@ RValue<Float> Rcp_pp(RValue<Float> val, bool exactAtPow2 = false);
 // Deprecated: use RcpSqrt
 // TODO(b/147516027): Remove when GLES frontend is removed
 RValue<Float> RcpSqrt_pp(RValue<Float> val);
-RValue<Float> Rcp(RValue<Float> x, Precision p = Precision::Full, bool exactAtPow2 = false);
-RValue<Float> RcpSqrt(RValue<Float> x, Precision p = Precision::Full);
+RValue<Float> Rcp(RValue<Float> x, bool relaxedPrecision, bool exactAtPow2 = false);
+RValue<Float> RcpSqrt(RValue<Float> x, bool relaxedPrecision);
 RValue<Float> Sqrt(RValue<Float> x);
 
 //	RValue<Int4> IsInf(RValue<Float> x);
@@ -2341,6 +2332,11 @@ RValue<Float4> operator%=(Float4 &lhs, RValue<Float4> rhs);
 RValue<Float4> operator+(RValue<Float4> val);
 RValue<Float4> operator-(RValue<Float4> val);
 
+// Computes `x * y + z`, which may be fused into one operation to produce a higher-precision result.
+RValue<Float4> MulAdd(RValue<Float4> x, RValue<Float4> y, RValue<Float4> z);
+// Computes a fused `x * y + z` operation. Caps::fmaIsFast indicates whether it emits an FMA instruction.
+RValue<Float4> FMA(RValue<Float4> x, RValue<Float4> y, RValue<Float4> z);
+
 RValue<Float4> Abs(RValue<Float4> x);
 RValue<Float4> Max(RValue<Float4> x, RValue<Float4> y);
 RValue<Float4> Min(RValue<Float4> x, RValue<Float4> y);
@@ -2351,8 +2347,8 @@ RValue<Float4> Rcp_pp(RValue<Float4> val, bool exactAtPow2 = false);
 // Deprecated: use RcpSqrt
 // TODO(b/147516027): Remove when GLES frontend is removed
 RValue<Float4> RcpSqrt_pp(RValue<Float4> val);
-RValue<Float4> Rcp(RValue<Float4> x, Precision p = Precision::Full, bool exactAtPow2 = false);
-RValue<Float4> RcpSqrt(RValue<Float4> x, Precision p = Precision::Full);
+RValue<Float4> Rcp(RValue<Float4> x, bool relaxedPrecision, bool exactAtPow2 = false);
+RValue<Float4> RcpSqrt(RValue<Float4> x, bool relaxedPrecision);
 RValue<Float4> Sqrt(RValue<Float4> x);
 RValue<Float4> Insert(RValue<Float4> val, RValue<Float> element, int i);
 RValue<Float> Extract(RValue<Float4> x, int i);
@@ -2405,12 +2401,11 @@ RValue<Float4> Floor(RValue<Float4> x);
 RValue<Float4> Ceil(RValue<Float4> x);
 
 // Trigonometric functions
-// TODO: Currently unimplemented for Subzero.
 RValue<Float4> Sin(RValue<Float4> x);
 RValue<Float4> Cos(RValue<Float4> x);
 RValue<Float4> Tan(RValue<Float4> x);
-RValue<Float4> Asin(RValue<Float4> x, Precision p);
-RValue<Float4> Acos(RValue<Float4> x, Precision p);
+RValue<Float4> Asin(RValue<Float4> x);
+RValue<Float4> Acos(RValue<Float4> x);
 RValue<Float4> Atan(RValue<Float4> x);
 RValue<Float4> Sinh(RValue<Float4> x);
 RValue<Float4> Cosh(RValue<Float4> x);
@@ -2421,7 +2416,6 @@ RValue<Float4> Atanh(RValue<Float4> x);
 RValue<Float4> Atan2(RValue<Float4> x, RValue<Float4> y);
 
 // Exponential functions
-// TODO: Currently unimplemented for Subzero.
 RValue<Float4> Pow(RValue<Float4> x, RValue<Float4> y);
 RValue<Float4> Exp(RValue<Float4> x);
 RValue<Float4> Log(RValue<Float4> x);
