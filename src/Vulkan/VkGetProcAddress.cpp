@@ -417,7 +417,6 @@ static const std::vector<std::pair<const char *, std::unordered_map<std::string,
 	{
 	    VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME,
 	    {
-
 	        MAKE_VULKAN_DEVICE_ENTRY(vkGetBufferDeviceAddressKHR),
 	        MAKE_VULKAN_DEVICE_ENTRY(vkGetBufferOpaqueCaptureAddressKHR),
 	        MAKE_VULKAN_DEVICE_ENTRY(vkGetDeviceMemoryOpaqueCaptureAddressKHR),
@@ -426,9 +425,32 @@ static const std::vector<std::pair<const char *, std::unordered_map<std::string,
 	{
 	    VK_KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME,
 	    {
-
 	        MAKE_VULKAN_DEVICE_ENTRY(vkCmdDrawIndirectCountKHR),
 	        MAKE_VULKAN_DEVICE_ENTRY(vkCmdDrawIndexedIndirectCountKHR),
+	    } },
+	// VK_KHR_dynamic_rendering
+	{
+	    VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME,
+	    {
+	        MAKE_VULKAN_DEVICE_ENTRY(vkCmdBeginRenderingKHR),
+	        MAKE_VULKAN_DEVICE_ENTRY(vkCmdEndRenderingKHR),
+	    } },
+	// VK_EXT_extended_dynamic_state
+	{
+	    VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME,
+	    {
+	        MAKE_VULKAN_DEVICE_ENTRY(vkCmdBindVertexBuffers2EXT),
+	        MAKE_VULKAN_DEVICE_ENTRY(vkCmdSetCullModeEXT),
+	        MAKE_VULKAN_DEVICE_ENTRY(vkCmdSetDepthBoundsTestEnableEXT),
+	        MAKE_VULKAN_DEVICE_ENTRY(vkCmdSetDepthCompareOpEXT),
+	        MAKE_VULKAN_DEVICE_ENTRY(vkCmdSetDepthTestEnableEXT),
+	        MAKE_VULKAN_DEVICE_ENTRY(vkCmdSetDepthWriteEnableEXT),
+	        MAKE_VULKAN_DEVICE_ENTRY(vkCmdSetFrontFaceEXT),
+	        MAKE_VULKAN_DEVICE_ENTRY(vkCmdSetPrimitiveTopologyEXT),
+	        MAKE_VULKAN_DEVICE_ENTRY(vkCmdSetScissorWithCountEXT),
+	        MAKE_VULKAN_DEVICE_ENTRY(vkCmdSetStencilOpEXT),
+	        MAKE_VULKAN_DEVICE_ENTRY(vkCmdSetStencilTestEnableEXT),
+	        MAKE_VULKAN_DEVICE_ENTRY(vkCmdSetViewportWithCountEXT),
 	    } },
 	// VK_EXT_line_rasterization
 	{
