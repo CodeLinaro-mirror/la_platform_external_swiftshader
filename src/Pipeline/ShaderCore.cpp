@@ -19,6 +19,11 @@
 
 #include <limits.h>
 
+// TODO(chromium:1299047)
+#ifndef SWIFTSHADER_LEGACY_PRECISION
+#	define SWIFTSHADER_LEGACY_PRECISION false
+#endif
+
 namespace sw {
 
 Vector4s::Vector4s()
@@ -150,46 +155,6 @@ Int4 &Vector4i::operator[](int i)
 	return x;
 }
 
-static Float4 Reciprocal(RValue<Float4> x, bool pp = false, bool finite = false, bool exactAtPow2 = false)
-{
-	Float4 rcp = Rcp_pp(x, exactAtPow2);
-
-	if(!pp)
-	{
-		rcp = (rcp + rcp) - (x * rcp * rcp);
-	}
-
-	return rcp;
-}
-
-static Float4 SinOrCos(RValue<Float4> x, bool sin)
-{
-	// Reduce to [-0.5, 0.5] range
-	Float4 y = x * Float4(1.59154943e-1f);  // 1/2pi
-	y = y - Round(y);
-
-	// From the paper: "A Fast, Vectorizable Algorithm for Producing Single-Precision Sine-Cosine Pairs"
-	// This implementation passes OpenGL ES 3.0 precision requirements, at the cost of more operations:
-	// !pp : 17 mul, 7 add, 1 sub, 1 reciprocal
-	//  pp : 4 mul, 2 add, 2 abs
-
-	Float4 y2 = y * y;
-	Float4 c1 = y2 * (y2 * (y2 * Float4(-0.0204391631f) + Float4(0.2536086171f)) + Float4(-1.2336977925f)) + Float4(1.0f);
-	Float4 s1 = y * (y2 * (y2 * (y2 * Float4(-0.0046075748f) + Float4(0.0796819754f)) + Float4(-0.645963615f)) + Float4(1.5707963235f));
-	Float4 c2 = (c1 * c1) - (s1 * s1);
-	Float4 s2 = Float4(2.0f) * s1 * c1;
-	Float4 r = Reciprocal(s2 * s2 + c2 * c2);
-
-	if(sin)
-	{
-		return Float4(2.0f) * s2 * c2 * r;
-	}
-	else
-	{
-		return ((c2 * c2) - (s2 * s2)) * r;
-	}
-}
-
 // Approximation of atan in [0..1]
 static Float4 Atan_01(Float4 x)
 {
@@ -206,19 +171,47 @@ static Float4 Atan_01(Float4 x)
 	return (x + x * (x2 * (a2 + x2 * (a4 + x2 * (a6 + x2 * (a8 + x2 * (a10 + x2 * (a12 + x2 * (a14 + x2 * a16)))))))));
 }
 
+// Polynomial approximation of order 5 for sin(x * 2 * pi) in the range [-1/4, 1/4]
+static Float4 Sin5(Float4 x)
+{
+	// A * x^5 + B * x^3 + C * x
+	// Exact at x = 0, 1/12, 1/6, 1/4, and their negatives, which correspond to x * 2 * pi = 0, pi/6, pi/3, pi/2
+	const Float4 A = (36288 - 20736 * sqrt(3)) / 5;
+	const Float4 B = 288 * sqrt(3) - 540;
+	const Float4 C = (47 - 9 * sqrt(3)) / 5;
+
+	Float4 x2 = x * x;
+
+	return ((A * x2 + B) * x2 + C) * x;
+}
+
 Float4 Sin(RValue<Float4> x)
 {
-	return SinOrCos(x, true);
+	const Float4 q = 0.25f;
+	const Float4 pi2 = 1 / (2 * 3.1415926535f);
+
+	// Range reduction and mirroring
+	Float4 x_2 = q - x * pi2;
+	Float4 z = q - Abs(x_2 - Round(x_2));
+
+	return Sin5(z);
 }
 
 Float4 Cos(RValue<Float4> x)
 {
-	return SinOrCos(x, false);
+	const Float4 q = 0.25f;
+	const Float4 pi2 = 1 / (2 * 3.1415926535f);
+
+	// Phase shift, range reduction, and mirroring
+	Float4 x_2 = x * pi2;
+	Float4 z = q - Abs(x_2 - Round(x_2));
+
+	return Sin5(z);
 }
 
 Float4 Tan(RValue<Float4> x)
 {
-	return SinOrCos(x, true) / SinOrCos(x, false);
+	return sw::Sin(x) / sw::Cos(x);
 }
 
 static Float4 Asin_4_terms(RValue<Float4> x)
@@ -322,6 +315,23 @@ Float4 Atan2(RValue<Float4> y, RValue<Float4> x)
 	return As<Float4>((precision_loss & As<Int4>(-atan2_theta)) | (~precision_loss & As<Int4>(theta)));  // FIXME: Vector select
 }
 
+// TODO(chromium:1299047)
+Float4 Exp2_legacy(RValue<Float4> x0)
+{
+	Int4 i = RoundInt(x0 - Float4(0.5f));
+	Float4 ii = As<Float4>((i + Int4(127)) << 23);
+
+	Float4 f = x0 - Float4(i);
+	Float4 ff = As<Float4>(Int4(0x3AF61905));
+	ff = ff * f + As<Float4>(Int4(0x3C134806));
+	ff = ff * f + As<Float4>(Int4(0x3D64AA23));
+	ff = ff * f + As<Float4>(Int4(0x3E75EAD4));
+	ff = ff * f + As<Float4>(Int4(0x3F31727B));
+	ff = ff * f + Float4(1.0f);
+
+	return ii * ff;
+}
+
 Float4 Exp2(RValue<Float4> x)
 {
 	// This implementation is based on 2^(i + f) = 2^i * 2^f,
@@ -331,21 +341,28 @@ Float4 Exp2(RValue<Float4> x)
 	// the IEEE-754 floating-point number. Clamp to prevent overflow
 	// past the representation of infinity.
 	Float4 x0 = x;
-	x0 = Min(x0, As<Float4>(Int4(0x43010000)));  // 129.00000e+0f
-	x0 = Max(x0, As<Float4>(Int4(0xC2FDFFFF)));  // -126.99999e+0f
+	x0 = Min(x0, As<Float4>(Int4(0x4300FFFF)));  // 128.999985
+	x0 = Max(x0, As<Float4>(Int4(0xC2FDFFFF)));  // -126.999992
 
-	Int4 i = RoundInt(x0 - Float4(0.5f));
+	if(SWIFTSHADER_LEGACY_PRECISION)  // TODO(chromium:1299047)
+	{
+		return Exp2_legacy(x0);
+	}
+
+	Float4 xi = Floor(x0);
+	Int4 i = Int4(xi);
 	Float4 ii = As<Float4>((i + Int4(127)) << 23);  // Add single-precision bias, and shift into exponent.
 
-	// For the fractional part use a polynomial
-	// which approximates 2^f in the 0 to 1 range.
-	Float4 f = x0 - Float4(i);
-	Float4 ff = As<Float4>(Int4(0x3AF61905));    // 1.8775767e-3f
-	ff = ff * f + As<Float4>(Int4(0x3C134806));  // 8.9893397e-3f
-	ff = ff * f + As<Float4>(Int4(0x3D64AA23));  // 5.5826318e-2f
-	ff = ff * f + As<Float4>(Int4(0x3E75EAD4));  // 2.4015361e-1f
-	ff = ff * f + As<Float4>(Int4(0x3F31727B));  // 6.9315308e-1f
-	ff = ff * f + Float4(1.0f);
+	// For the fractional part use a polynomial which approximates 2^f in the 0 to 1 range.
+	// To be exact at integers it uses the form f(x) * x + 1.
+	Float4 f = x0 - xi;
+	Float4 a = As<Float4>(Int4(0x3AF4C5DC));  // 1.8674689e-3f
+	Float4 b = As<Float4>(Int4(0x3C13BA55));  // 9.0165929e-3f
+	Float4 c = As<Float4>(Int4(0x3D648E6A));  // 5.5799878e-2f
+	Float4 d = As<Float4>(Int4(0x3E75EDB7));  // 2.4016463e-1f
+	Float4 e = As<Float4>(Int4(0x3F31725D));  // 6.9315127e-1f
+
+	Float4 ff = ((((a * f + b) * f + c) * f + d) * f + e) * f + Float4(1.0f);
 
 	return ii * ff;
 }
@@ -518,86 +535,6 @@ Float4 reciprocalSquareRoot(RValue<Float4> x, bool absolute, bool pp)
 Float4 modulo(RValue<Float4> x, RValue<Float4> y)
 {
 	return x - y * Floor(x / y);
-}
-
-Float4 sine_pi(RValue<Float4> x, bool pp)
-{
-	const Float4 A = Float4(-4.05284734e-1f);  // -4/pi^2
-	const Float4 B = Float4(1.27323954e+0f);   // 4/pi
-	const Float4 C = Float4(7.75160950e-1f);
-	const Float4 D = Float4(2.24839049e-1f);
-
-	// Parabola approximating sine
-	Float4 sin = x * (Abs(x) * A + B);
-
-	// Improve precision from 0.06 to 0.001
-	if(true)
-	{
-		sin = sin * (Abs(sin) * D + C);
-	}
-
-	return sin;
-}
-
-Float4 cosine_pi(RValue<Float4> x, bool pp)
-{
-	// cos(x) = sin(x + pi/2)
-	Float4 y = x + Float4(1.57079632e+0f);
-
-	// Wrap around
-	y -= As<Float4>(CmpNLT(y, Float4(3.14159265e+0f)) & As<Int4>(Float4(6.28318530e+0f)));
-
-	return sine_pi(y, pp);
-}
-
-Float4 sine(RValue<Float4> x, bool pp)
-{
-	// Reduce to [-0.5, 0.5] range
-	Float4 y = x * Float4(1.59154943e-1f);  // 1/2pi
-	y = y - Round(y);
-
-	if(!pp)
-	{
-		// From the paper: "A Fast, Vectorizable Algorithm for Producing Single-Precision Sine-Cosine Pairs"
-		// This implementation passes OpenGL ES 3.0 precision requirements, at the cost of more operations:
-		// !pp : 17 mul, 7 add, 1 sub, 1 reciprocal
-		//  pp : 4 mul, 2 add, 2 abs
-
-		Float4 y2 = y * y;
-		Float4 c1 = y2 * (y2 * (y2 * Float4(-0.0204391631f) + Float4(0.2536086171f)) + Float4(-1.2336977925f)) + Float4(1.0f);
-		Float4 s1 = y * (y2 * (y2 * (y2 * Float4(-0.0046075748f) + Float4(0.0796819754f)) + Float4(-0.645963615f)) + Float4(1.5707963235f));
-		Float4 c2 = (c1 * c1) - (s1 * s1);
-		Float4 s2 = Float4(2.0f) * s1 * c1;
-		return Float4(2.0f) * s2 * c2 * reciprocal(s2 * s2 + c2 * c2);
-	}
-
-	const Float4 A = Float4(-16.0f);
-	const Float4 B = Float4(8.0f);
-	const Float4 C = Float4(7.75160950e-1f);
-	const Float4 D = Float4(2.24839049e-1f);
-
-	// Parabola approximating sine
-	Float4 sin = y * (Abs(y) * A + B);
-
-	// Improve precision from 0.06 to 0.001
-	if(true)
-	{
-		sin = sin * (Abs(sin) * D + C);
-	}
-
-	return sin;
-}
-
-Float4 cosine(RValue<Float4> x, bool pp)
-{
-	// cos(x) = sin(x + pi/2)
-	Float4 y = x + Float4(1.57079632e+0f);
-	return sine(y, pp);
-}
-
-Float4 tangent(RValue<Float4> x, bool pp)
-{
-	return sine(x, pp) / cosine(x, pp);
 }
 
 Float4 arccos(RValue<Float4> x, bool pp)

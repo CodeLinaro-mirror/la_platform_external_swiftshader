@@ -19,6 +19,7 @@
 #include "ShaderCore.hpp"
 #include "SpirvBinary.hpp"
 #include "SpirvID.hpp"
+#include "SpirvProfiler.hpp"
 #include "Device/Config.hpp"
 #include "Device/Sampler.hpp"
 #include "System/Debug.hpp"
@@ -471,7 +472,8 @@ public:
 		{
 			Unknown,
 			GLSLstd450,
-			OpenCLDebugInfo100
+			OpenCLDebugInfo100,
+			NonSemanticInfo,
 		};
 
 		Name name;
@@ -615,7 +617,8 @@ public:
 	            const vk::RenderPass *renderPass,
 	            uint32_t subpassIndex,
 	            bool robustBufferAccess,
-	            const std::shared_ptr<vk::dbg::Context> &dbgctx);
+	            const std::shared_ptr<vk::dbg::Context> &dbgctx,
+	            std::shared_ptr<SpirvProfiler> profiler);
 
 	~SpirvShader();
 
@@ -903,6 +906,13 @@ private:
 	HandleMap<Function> functions;
 	std::unordered_map<StringID, String> strings;
 
+	std::shared_ptr<SpirvProfiler> profiler;
+
+	bool IsProfilingEnabled() const
+	{
+		return profiler != nullptr;
+	}
+
 	// DeclareType creates a Type for the given OpTypeX instruction, storing
 	// it into the types map. It is called from the analysis pass (constructor).
 	void DeclareType(InsnIterator insn);
@@ -1009,19 +1019,14 @@ private:
 		          RValue<SIMD::Int> activeLaneMask,
 		          RValue<SIMD::Int> storesAndAtomicsMask,
 		          const vk::DescriptorSet::Bindings &descriptorSets,
-		          bool robustBufferAccess,
-		          unsigned int multiSampleCount,
-		          spv::ExecutionModel executionModel)
+		          unsigned int multiSampleCount)
 		    : routine(routine)
 		    , function(function)
 		    , activeLaneMaskValue(activeLaneMask.value())
 		    , storesAndAtomicsMaskValue(storesAndAtomicsMask.value())
 		    , descriptorSets(descriptorSets)
-		    , robustBufferAccess(robustBufferAccess)
 		    , multiSampleCount(multiSampleCount)
-		    , executionModel(executionModel)
 		{
-			ASSERT(executionModel != spv::ExecutionModelMax);  // Must parse OpEntryPoint before emitting.
 		}
 
 		// Returns the mask describing the active lanes as updated by dynamic
@@ -1078,8 +1083,6 @@ private:
 
 		const vk::DescriptorSet::Bindings &descriptorSets;
 
-		OutOfBoundsBehavior getOutOfBoundsBehavior(spv::StorageClass storageClass) const;
-
 		unsigned int getMultiSampleCount() const { return multiSampleCount; }
 
 		Intermediate &createIntermediate(Object::ID id, uint32_t componentCount)
@@ -1115,9 +1118,7 @@ private:
 		std::unordered_map<Object::ID, Intermediate> intermediates;
 		std::unordered_map<Object::ID, SIMD::Pointer> pointers;
 
-		const bool robustBufferAccess;  // Emit robustBufferAccess safe code.
 		const unsigned int multiSampleCount;
-		const spv::ExecutionModel executionModel;
 	};
 
 	// EmitResult is an enumerator of result values from the Emit functions.
@@ -1238,6 +1239,8 @@ private:
 	//  - InterfaceVariable
 	// Calling GetPointerToData with objects of any other kind will assert.
 	SIMD::Pointer GetPointerToData(Object::ID id, Int arrayIndex, EmitState const *state) const;
+
+	OutOfBoundsBehavior getOutOfBoundsBehavior(Object::ID pointerId, EmitState const *state) const;
 
 	SIMD::Pointer WalkExplicitLayoutAccessChain(Object::ID id, uint32_t numIndexes, uint32_t const *indexIds, EmitState const *state) const;
 	SIMD::Pointer WalkAccessChain(Object::ID id, uint32_t numIndexes, uint32_t const *indexIds, EmitState const *state) const;
@@ -1483,8 +1486,8 @@ public:
 
 	std::unordered_map<SpirvShader::Object::ID, Variable> variables;
 	std::unordered_map<uint32_t, SamplerCache> samplerCache;  // Indexed by the instruction position, in words.
-	Variable inputs = Variable{ MAX_INTERFACE_COMPONENTS };
-	Variable outputs = Variable{ MAX_INTERFACE_COMPONENTS };
+	SIMD::Float inputs[MAX_INTERFACE_COMPONENTS];
+	SIMD::Float outputs[MAX_INTERFACE_COMPONENTS];
 	InterpolationData interpolationData;
 
 	Pointer<Byte> device;
@@ -1554,12 +1557,13 @@ public:
 	}
 
 private:
-	// The phis are only accessible to SpirvShader as they are only used and
-	// exist between calls to SpirvShader::emitProlog() and
-	// SpirvShader::emitEpilog().
+	// The phis and the profile data are only accessible to SpirvShader
+	// as they are only used and exist between calls to
+	// SpirvShader::emitProlog() and SpirvShader::emitEpilog().
 	friend class SpirvShader;
 
 	std::unordered_map<SpirvShader::Object::ID, Variable> phis;
+	std::unique_ptr<SpirvProfileData> profData;
 };
 
 }  // namespace sw
