@@ -222,7 +222,7 @@ public:
 				// encoding scheme. The UTF-8 octets (8-bit bytes) are packed
 				// four per word, following the little-endian convention (i.e.,
 				// the first octet is in the lowest-order 8 bits of the word).
-				// The final word contains the string’s nul-termination
+				// The final word contains the string's nul-termination
 				// character (0), and all contents past the end of the string in
 				// the final word are padded with 0.
 				if(u8[3] == 0)
@@ -631,9 +631,10 @@ public:
 		bool DepthUnchanged : 1;
 
 		// Compute workgroup dimensions
-		int WorkgroupSizeX = 1;
-		int WorkgroupSizeY = 1;
-		int WorkgroupSizeZ = 1;
+		Object::ID WorkgroupSizeX = 1;
+		Object::ID WorkgroupSizeY = 1;
+		Object::ID WorkgroupSizeZ = 1;
+		bool useWorkgroupSizeId = false;
 	};
 
 	const ExecutionModes &getExecutionModes() const
@@ -879,6 +880,10 @@ public:
 	void emitEpilog(SpirvRoutine *routine) const;
 	void clearPhis(SpirvRoutine *routine) const;
 
+	uint32_t getWorkgroupSizeX() const;
+	uint32_t getWorkgroupSizeY() const;
+	uint32_t getWorkgroupSizeZ() const;
+
 	bool containsImageWrite() const { return imageWriteEmitted; }
 
 	using BuiltInHash = std::hash<std::underlying_type<spv::BuiltIn>::type>;
@@ -920,6 +925,7 @@ private:
 	void ProcessExecutionMode(InsnIterator it);
 
 	uint32_t ComputeTypeSize(InsnIterator insn);
+	Decorations GetDecorationsForId(TypeOrObjectID id) const;
 	void ApplyDecorationsForId(Decorations *d, TypeOrObjectID id) const;
 	void ApplyDecorationsForIdMember(Decorations *d, Type::ID id, uint32_t member) const;
 	void ApplyDecorationsForAccessChain(Decorations *d, DescriptorDecorations *dd, Object::ID baseId, uint32_t numIndexes, uint32_t const *indexIds) const;
@@ -1504,7 +1510,7 @@ public:
 	// Give careful consideration to the runtime performance loss before adding
 	// more state here.
 	std::array<SIMD::Int, 2> windowSpacePosition;
-	Int viewID;  // slice offset into input attachments for multiview, even if the shader doesn't use ViewIndex
+	Int layer;  // slice offset into input attachments for multiview, even if the shader doesn't use ViewIndex
 	Int instanceID;
 	SIMD::Int vertexIndex;
 	std::array<SIMD::Float, 4> fragCoord;
