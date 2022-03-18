@@ -219,6 +219,7 @@ SpirvShader::EmitResult SpirvShader::EmitVariable(InsnIterator insn, EmitState *
 		case spv::StorageClassOutput:
 		case spv::StorageClassPrivate:
 		case spv::StorageClassFunction:
+		case spv::StorageClassWorkgroup:
 			{
 				bool interleavedByLane = IsStorageInterleavedByLane(objectTy.storageClass);
 				auto ptr = GetPointerToData(resultId, 0, state);
@@ -229,6 +230,12 @@ SpirvShader::EmitResult SpirvShader::EmitVariable(InsnIterator insn, EmitState *
 					auto robustness = OutOfBoundsBehavior::UndefinedBehavior;  // Local variables are always within bounds.
 					p.Store(initialValue.Float(el.index), robustness, state->activeLaneMask());
 				});
+				if(objectTy.storageClass == spv::StorageClassWorkgroup)
+				{
+					// Initialization of workgroup memory is done by each subgroup and requires waiting on a barrier.
+					// TODO(b/221242292): Initialize just once per workgroup and eliminate the barrier.
+					Yield(YieldResult::ControlBarrier);
+				}
 			}
 			break;
 		default:
@@ -355,8 +362,7 @@ void SpirvShader::VisitMemoryObject(Object::ID id, const MemoryVisitor &f) const
 
 	if(IsExplicitLayout(type.storageClass))
 	{
-		Decorations d{};
-		ApplyDecorationsForId(&d, id);
+		Decorations d = GetDecorationsForId(id);
 		uint32_t index = 0;
 		VisitMemoryObjectInner(typeId, d, index, 0, f);
 	}
