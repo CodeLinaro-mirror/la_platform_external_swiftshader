@@ -70,10 +70,7 @@ public:
 	void dispatchBase(uint32_t baseGroupX, uint32_t baseGroupY, uint32_t baseGroupZ,
 	                  uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ);
 
-	void pipelineBarrier(VkPipelineStageFlags srcStageMask, VkPipelineStageFlags dstStageMask, VkDependencyFlags dependencyFlags,
-	                     uint32_t memoryBarrierCount, const VkMemoryBarrier *pMemoryBarriers,
-	                     uint32_t bufferMemoryBarrierCount, const VkBufferMemoryBarrier *pBufferMemoryBarriers,
-	                     uint32_t imageMemoryBarrierCount, const VkImageMemoryBarrier *pImageMemoryBarriers);
+	void pipelineBarrier(const VkDependencyInfo &pDependencyInfo);
 	void bindPipeline(VkPipelineBindPoint pipelineBindPoint, Pipeline *pipeline);
 	void bindVertexBuffers(uint32_t firstBinding, uint32_t bindingCount,
 	                       const VkBuffer *pBuffers, const VkDeviceSize *pOffsets);
@@ -81,7 +78,7 @@ public:
 	void beginQuery(QueryPool *queryPool, uint32_t query, VkQueryControlFlags flags);
 	void endQuery(QueryPool *queryPool, uint32_t query);
 	void resetQueryPool(QueryPool *queryPool, uint32_t firstQuery, uint32_t queryCount);
-	void writeTimestamp(VkPipelineStageFlagBits pipelineStage, QueryPool *queryPool, uint32_t query);
+	void writeTimestamp(VkPipelineStageFlags2 pipelineStage, QueryPool *queryPool, uint32_t query);
 	void copyQueryPoolResults(const QueryPool *queryPool, uint32_t firstQuery, uint32_t queryCount,
 	                          Buffer *dstBuffer, VkDeviceSize dstOffset, VkDeviceSize stride, VkQueryResultFlags flags);
 	void pushConstants(PipelineLayout *layout, VkShaderStageFlags stageFlags,
@@ -102,11 +99,11 @@ public:
 	void bindIndexBuffer(Buffer *buffer, VkDeviceSize offset, VkIndexType indexType);
 	void dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ);
 	void dispatchIndirect(Buffer *buffer, VkDeviceSize offset);
-	void copyBuffer(const VkCopyBufferInfo2KHR &copyBufferInfo);
-	void copyImage(const VkCopyImageInfo2KHR &copyImageInfo);
-	void blitImage(const VkBlitImageInfo2KHR &blitImageInfo);
-	void copyBufferToImage(const VkCopyBufferToImageInfo2KHR &copyBufferToImageInfo);
-	void copyImageToBuffer(const VkCopyImageToBufferInfo2KHR &copyImageToBufferInfo);
+	void copyBuffer(const VkCopyBufferInfo2 &copyBufferInfo);
+	void copyImage(const VkCopyImageInfo2 &copyImageInfo);
+	void blitImage(const VkBlitImageInfo2 &blitImageInfo);
+	void copyBufferToImage(const VkCopyBufferToImageInfo2 &copyBufferToImageInfo);
+	void copyImageToBuffer(const VkCopyImageToBufferInfo2 &copyImageToBufferInfo);
 	void updateBuffer(Buffer *dstBuffer, VkDeviceSize dstOffset, VkDeviceSize dataSize, const void *pData);
 	void fillBuffer(Buffer *dstBuffer, VkDeviceSize dstOffset, VkDeviceSize size, uint32_t data);
 	void clearColorImage(Image *image, VkImageLayout imageLayout, const VkClearColorValue *pColor,
@@ -115,13 +112,10 @@ public:
 	                            uint32_t rangeCount, const VkImageSubresourceRange *pRanges);
 	void clearAttachments(uint32_t attachmentCount, const VkClearAttachment *pAttachments,
 	                      uint32_t rectCount, const VkClearRect *pRects);
-	void resolveImage(const VkResolveImageInfo2KHR &resolveImageInfo);
-	void setEvent(Event *event, VkPipelineStageFlags stageMask);
-	void resetEvent(Event *event, VkPipelineStageFlags stageMask);
-	void waitEvents(uint32_t eventCount, const VkEvent *pEvents, VkPipelineStageFlags srcStageMask,
-	                VkPipelineStageFlags dstStageMask, uint32_t memoryBarrierCount, const VkMemoryBarrier *pMemoryBarriers,
-	                uint32_t bufferMemoryBarrierCount, const VkBufferMemoryBarrier *pBufferMemoryBarriers,
-	                uint32_t imageMemoryBarrierCount, const VkImageMemoryBarrier *pImageMemoryBarriers);
+	void resolveImage(const VkResolveImageInfo2 &resolveImageInfo);
+	void setEvent(Event *event, const VkDependencyInfo &pDependencyInfo);
+	void resetEvent(Event *event, VkPipelineStageFlags2 stageMask);
+	void waitEvents(uint32_t eventCount, const VkEvent *pEvents, const VkDependencyInfo &pDependencyInfo);
 
 	void draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance);
 	void drawIndexed(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance);
