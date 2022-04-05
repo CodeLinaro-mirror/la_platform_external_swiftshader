@@ -1,7 +1,7 @@
 {
     "remote": "https://github.com/KhronosGroup/VK-GL-CTS.git",
     "branch": "",
-    "sha": "b594e2aabae92e183421a58ea3f710f1b50504f9",
+    "sha": "f7e842466e0aa22c15d9acf05c3a3db151d94bee",
     "patches": [
         "tests/regres/deqp-patches/deqp-x11.patch"
     ]
