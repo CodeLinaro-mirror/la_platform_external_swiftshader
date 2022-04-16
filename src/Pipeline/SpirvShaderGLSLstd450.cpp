@@ -295,7 +295,7 @@ SpirvShader::EmitResult SpirvShader::EmitExtGLSLstd450(InsnIterator insn, EmitSt
 			auto I = Operand(this, state, insn.word(5));
 			auto N = Operand(this, state, insn.word(6));
 
-			SIMD::Float d = Dot(type.componentCount, I, N);
+			SIMD::Float d = FDot(type.componentCount, I, N);
 
 			for(auto i = 0u; i < type.componentCount; i++)
 			{
@@ -310,7 +310,7 @@ SpirvShader::EmitResult SpirvShader::EmitExtGLSLstd450(InsnIterator insn, EmitSt
 			auto eta = Operand(this, state, insn.word(7));
 			Decorations r = GetDecorationsForId(insn.resultId());
 
-			SIMD::Float d = Dot(type.componentCount, I, N);
+			SIMD::Float d = FDot(type.componentCount, I, N);
 			SIMD::Float k = SIMD::Float(1.0f) - eta.Float(0) * eta.Float(0) * (SIMD::Float(1.0f) - d * d);
 			SIMD::Int pos = CmpNLT(k, SIMD::Float(0.0f));
 			SIMD::Float t = (eta.Float(0) * d + Sqrt(k, r.RelaxedPrecision));
@@ -327,7 +327,7 @@ SpirvShader::EmitResult SpirvShader::EmitExtGLSLstd450(InsnIterator insn, EmitSt
 			auto I = Operand(this, state, insn.word(6));
 			auto Nref = Operand(this, state, insn.word(7));
 
-			SIMD::Float d = Dot(type.componentCount, I, Nref);
+			SIMD::Float d = FDot(type.componentCount, I, Nref);
 			SIMD::Int neg = CmpLT(d, SIMD::Float(0.0f));
 
 			for(auto i = 0u; i < type.componentCount; i++)
@@ -340,7 +340,7 @@ SpirvShader::EmitResult SpirvShader::EmitExtGLSLstd450(InsnIterator insn, EmitSt
 	case GLSLstd450Length:
 		{
 			auto x = Operand(this, state, insn.word(5));
-			SIMD::Float d = Dot(getObjectType(insn.word(5)).componentCount, x, x);
+			SIMD::Float d = FDot(getObjectType(insn.word(5)).componentCount, x, x);
 			Decorations r = GetDecorationsForId(insn.resultId());
 
 			dst.move(0, Sqrt(d, r.RelaxedPrecision));
@@ -351,7 +351,7 @@ SpirvShader::EmitResult SpirvShader::EmitExtGLSLstd450(InsnIterator insn, EmitSt
 			auto x = Operand(this, state, insn.word(5));
 			Decorations r = GetDecorationsForId(insn.resultId());
 
-			SIMD::Float d = Dot(getObjectType(insn.word(5)).componentCount, x, x);
+			SIMD::Float d = FDot(getObjectType(insn.word(5)).componentCount, x, x);
 			SIMD::Float invLength = SIMD::Float(1.0f) / Sqrt(d, r.RelaxedPrecision);
 
 			for(auto i = 0u; i < type.componentCount; i++)
@@ -1086,10 +1086,20 @@ SIMD::Float SpirvShader::Interpolate(SIMD::Pointer const &ptr, int32_t location,
 	Pointer<Byte> planeEquation = interpolationData.primitive + OFFSET(Primitive, V[packedInterpolant]);
 	if(ptr.hasDynamicOffsets)
 	{
-		// This code assumes all dynamic offsets are equal
-		Int offset = ((Extract(ptr.dynamicOffsets, 0) + ptr.staticOffsets[0]) >> 2) + component;
-		offset = Min(offset, Int(inputs.size() - interpolant - 1));
-		planeEquation += (offset * sizeof(PlaneEquation));
+		// Combine plane equations into one
+		SIMD::Float A;
+		SIMD::Float B;
+		SIMD::Float C;
+
+		for(int i = 0; i < SIMD::Width; ++i)
+		{
+			Int offset = ((Extract(ptr.dynamicOffsets, i) + ptr.staticOffsets[i]) >> 2) + component;
+			Pointer<Byte> planeEquationI = planeEquation + (offset * sizeof(PlaneEquation));
+			A = Insert(A, Extract(*Pointer<SIMD::Float>(planeEquationI + OFFSET(PlaneEquation, A), 16), i), i);
+			B = Insert(B, Extract(*Pointer<SIMD::Float>(planeEquationI + OFFSET(PlaneEquation, B), 16), i), i);
+			C = Insert(C, Extract(*Pointer<SIMD::Float>(planeEquationI + OFFSET(PlaneEquation, C), 16), i), i);
+		}
+		return ::Interpolate(x, y, rhw, A, B, C, false, true);
 	}
 	else
 	{
